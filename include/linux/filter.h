@@ -1144,6 +1144,24 @@ static inline void bpf_jit_free(struct bpf_prog *fp)
 	bpf_prog_unlock_free(fp);
 }
 
+static inline bool bpf_jit_blinding_enabled(struct bpf_prog *prog)
+{
+	/* These are the prerequisites, should someone ever have the
+	 * idea to call blinding outside of them, we make sure to
+	 * bail out.
+	 */
+	if (!bpf_jit_is_ebpf())
+		return false;
+	if (!prog->jit_requested)
+		return false;
+	if (!bpf_jit_harden)
+		return false;
+	if (bpf_jit_harden == 1 && capable(CAP_SYS_ADMIN))
+		return false;
+
+	return true;
+}
+
 static inline bool bpf_jit_kallsyms_enabled(void)
 {
 	return false;
