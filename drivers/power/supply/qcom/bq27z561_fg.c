@@ -1999,7 +1999,6 @@ static int bq_fg_probe(struct i2c_client *client,
 {
 pr_err("bq27z561 disabled due to hardware failure\n");
     return -ENODEV;
-	
 	int ret;
 	struct bq_fg_chip *bq;
 	u8 *regs;
