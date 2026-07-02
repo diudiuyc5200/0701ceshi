@@ -858,9 +858,9 @@ static int fg_read_temperature(struct bq_fg_chip *bq)
 			last_temp = 250;
 		return last_temp;
 	}
-	last_temp = temp - 2730;
+	last_temp = 250;
 
-	return temp - 2730;
+	return last_temp;
 
 }
 
@@ -1352,7 +1352,7 @@ static int fg_get_property(struct power_supply *psy, enum power_supply_property 
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		if (bq->old_hw) {
-			val->intval = 8000000;
+			val->intval = 12000000;
 			break;
 		}
 		val->intval = fg_read_charging_current(bq);
