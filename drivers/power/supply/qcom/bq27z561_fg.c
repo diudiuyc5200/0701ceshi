@@ -166,6 +166,8 @@ struct bq_fg_chip {
 	/* 新增：charge_full自定义覆盖变量 */
 	int custom_charge_full;
 	bool charge_full_override;
+	bool skip_writes;
+	bool skip_reads;
 
 	struct	delayed_work monitor_work;
 	struct power_supply *fg_psy;
