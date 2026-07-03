@@ -388,31 +388,21 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		val = -1 * level;
 	} else {
 		unsigned int refresh_rate = dsi_panel_get_refresh_rate();
+		unsigned int calc_rr;
+
+		// 方案1核心：只要高于60，全部强制使用90作为换算基准
+		if (refresh_rate > 60)
+			calc_rr = 90;
+		else
+			calc_rr = 60;
 
 		scm_data[0] = level;
 		scm_data[1] = priv->bin.total_time;
-		if (refresh_rate > 60) {
-    // 【多档位超频核心优化逻辑】
-    if (refresh_rate == 90) {
-        // 90Hz 档位：放大 1.5 倍 (1 + 0.5) 效率最高
-        scm_data[2] = priv->bin.busy_time + (priv->bin.busy_time >> 1);
-    } else if (refresh_rate == 81) {
-        // 81Hz 档位：81/60 = 1.35 倍。
-        // 用位移近似表达：1 + 0.25 (>>2) + 0.0625 (>>4) = 1.3125 倍
-        // 这样既免除了乘除法开销，又非常接近 1.35 倍的目标
-        scm_data[2] = priv->bin.busy_time + (priv->bin.busy_time >> 2) + (priv->bin.busy_time >> 4);
-    } else if (refresh_rate == 72) {
-        // 72Hz 档位：72/60 = 1.2 倍。
-        // 用位移近似表达：1 + 0.125 (>>3) + 0.0625 (>>4) = 1.1875 倍
-        scm_data[2] = priv->bin.busy_time + (priv->bin.busy_time >> 3) + (priv->bin.busy_time >> 4);
-    } else {
-        // 保底：如果是 72/81/90 之外的其他超频档位，走原版通用乘除法
-        scm_data[2] = priv->bin.busy_time * refresh_rate / 60;
-    }
-} else {
-    // 默认 60Hz 及以下（或异常值 0），保持原样，保证省电和初始安全
-    scm_data[2] = priv->bin.busy_time;
-}
+		// 向上取整防止小数丢失，负载计算更准确
+		if (calc_rr > 60)
+			scm_data[2] = div_u64((u64)priv->bin.busy_time * calc_rr + 59, 60);
+		else
+			scm_data[2] = priv->bin.busy_time;
 		scm_data[3] = context_count;
 		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
 					&val, sizeof(val), priv);
