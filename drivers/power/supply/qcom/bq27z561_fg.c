@@ -1188,7 +1188,7 @@ static int fg_set_property(struct power_supply *psy,
 		break;
 	/* 新增 charge_full 写入分支 */
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		if (val->intval >= 2000000 && val->intval <= 20000000) {
+		if (val->intval >= 500000 && val->intval <= 20000000) {
 			bq->custom_charge_full = val->intval;
 			bq->charge_full_override = true;
 			power_supply_changed(bq->fg_psy);

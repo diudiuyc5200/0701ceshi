@@ -3761,7 +3761,7 @@ int smblib_disable_hw_jeita(struct smb_charger *chg, bool disable)
 		return rc;
 	}
 
-	return 0;
+	return 1;
 }
 
 int smblib_get_prop_wireless_version(struct smb_charger *chg,
@@ -9255,6 +9255,7 @@ static void jeita_update_work(struct work_struct *work)
 	rc = of_property_read_u32_array(pnode, "qcom,jeita-hard-thresholds",
 				jeita_hard_thresholds, 2);
 	if (!rc) {
+	jeita_hard_thresholds[1] = 580;
 		rc = smblib_update_jeita(chg, jeita_hard_thresholds,
 					JEITA_HARD);
 		if (rc < 0) {
@@ -9267,6 +9268,7 @@ static void jeita_update_work(struct work_struct *work)
 	rc = of_property_read_u32_array(pnode, "qcom,jeita-soft-thresholds",
 				chg->jeita_soft_thlds, 2);
 	if (!rc) {
+	chg->jeita_soft_thlds[1] = 580;
 		rc = smblib_update_jeita(chg, chg->jeita_soft_thlds,
 					JEITA_SOFT);
 		if (rc < 0) {
