@@ -6334,7 +6334,6 @@ static void update_kswapd_threads_node(int nid)
 		for (hid = start_idx; hid < (start_idx + increase); hid++) {
 			pgdat->mkswapd[hid] = kthread_run_perf_critical(cpu_hp_mask, kswapd, pgdat,
 									"kswapd%d:%d", nid, hid);
-						"kswapd%d:%d", nid, hid);
 			if (IS_ERR(pgdat->mkswapd[hid])) {
 				pr_err("Failed to start kswapd%d on node %d\n",
 					hid, nid);
