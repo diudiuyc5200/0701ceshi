@@ -44,8 +44,8 @@
 			opp-microvolt = <30>;
 		};
 
-		opp-300000000 {
-			opp-hz = /bits/ 64 <300000000>;
+		opp-257000000 {
+			opp-hz = /bits/ 64 <257000000>;
 			opp-microvolt = <26>;
 		};
 	};
