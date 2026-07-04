@@ -36,17 +36,17 @@ static struct work_struct input_boost_work;
 
 static bool input_boost_enabled;
 
-static unsigned int input_boost_ms = 40;
-module_param(input_boost_ms, uint, 0644);
+static unsigned int input_boost_ms = 120;
+//module_param(input_boost_ms, uint, 0644);//
 
-static unsigned int sched_boost_on_input;
-module_param(sched_boost_on_input, uint, 0644);
+static unsigned int sched_boost_on_input = 2;
+//module_param(sched_boost_on_input, uint, 0644);//
 
 static bool sched_boost_active;
 
 static struct delayed_work input_boost_rem;
 static u64 last_input_time;
-#define MIN_INPUT_INTERVAL (150 * USEC_PER_MSEC)
+#define MIN_INPUT_INTERVAL (30 * USEC_PER_MSEC)
 
 static int set_input_boost_freq(const char *buf, const struct kernel_param *kp)
 {
@@ -191,52 +191,60 @@ static void do_input_boost(struct work_struct *work)
 {
 	unsigned int i, ret;
 	struct cpu_sync *i_sync_info;
-
-	cancel_delayed_work_sync(&input_boost_rem);
+	cancel_delayed_work_sync(&input_rem);
 	if (sched_boost_active) {
 		sched_set_boost(0);
 		sched_boost_active = false;
 	}
-
-	/* Set the input_boost_min for all CPUs in the system */
-	pr_debug("Setting input boost min for all CPUs\n");
+	pr_debug("Setting input boost min for performance cores\n");
 	for_each_possible_cpu(i) {
 		i_sync_info = &per_cpu(sync_info, i);
-		i_sync_info->input_boost_min = i_sync_info->input_boost_freq;
+		// 高通4.14 八核典型：0-3小核，4-7大核
+		if (i >= 4)
+			i_sync_info->input_boost_min = i_sync_info->input_boost_freq;
+		else
+			i_sync_info->input_boost_min = 0;
 	}
-
-	/* Update policies for all online CPUs */
 	update_policy_online();
-
-	/* Enable scheduler boost to migrate tasks to big cluster */
 	if (sched_boost_on_input > 0) {
 		ret = sched_set_boost(sched_boost_on_input);
 		if (ret)
-			pr_debug("cpu-boost: sched boost enable failed\n");
+			pr_debug("sched boost fail\n");
 		else
 			sched_boost_active = true;
 	}
-
-	queue_delayed_work(cpu_boost_wq, &input_boost_rem,
-					msecs_to_jiffies(input_boost_ms));
+	queue_delayed_work(cpu_boost_wq, &input_boost_rem, msecs_to_jiffies(input_boost_ms));
 }
 
 static void cpuboost_input_event(struct input_handle *handle,
 		unsigned int type, unsigned int code, int value)
 {
 	u64 now;
-
 	if (!input_boost_enabled)
+		return;
+
+	// 只识别触摸按下/抬起事件，过滤XY坐标
+	if (type != EV_KEY || code != BTN_TOUCH)
 		return;
 
 	now = ktime_to_us(ktime_get());
 	if (now - last_input_time < MIN_INPUT_INTERVAL)
 		return;
 
-	if (work_pending(&input_boost_work))
-		return;
+	// 区分按下(1)、滑动持续boost、抬起不延长
+	unsigned int cur_boost_ms = 120;
+	if (value == 1)
+		cur_boost_ms = 180; // 手指按下加长boost
 
+	// 原有丢弃任务逻辑改成刷新延时，滑动不断boost
+	if (work_pending(&input_boost_work)) {
+		cancel_delayed_work_sync(&input_boost_work);
+	}
 	queue_work(cpu_boost_wq, &input_boost_work);
+	// 更新boost延时时长
+	cancel_delayed_work_sync(&input_boost_rem);
+	queue_delayed_work(cpu_boost_wq, &input_boost_rem, msecs_to_jiffies(cur_boost_ms));
+
 	last_input_time = ktime_to_us(ktime_get());
 }
 
