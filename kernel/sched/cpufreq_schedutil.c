@@ -20,6 +20,7 @@
 #include "sched.h"
 
 #define SUGOV_KTHREAD_PRIORITY	50
+#define SUGOV_HIGH_FREQ_HOLD_NS (100 * NSEC_PER_MSEC)  /* 高频保持100ms */
 
 struct sugov_tunables {
 	struct gov_attr_set attr_set;
@@ -213,6 +214,16 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 
     freq = (unsigned int)((unsigned long long)policy->cpuinfo.max_freq * util / max);
 
+    /*
+     * 如果之前频率很高，不要一次性降太多
+     * 最多降 20%
+     */
+    if (sg_policy->next_freq != UINT_MAX && freq < sg_policy->next_freq) {
+        unsigned int min_allowed = sg_policy->next_freq * 80 / 100;
+        if (freq < min_allowed)
+            freq = min_allowed;
+    }
+
     if (freq == sg_policy->cached_raw_freq && sg_policy->next_freq != UINT_MAX)
         return sg_policy->next_freq;
 
@@ -341,15 +352,30 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
     }
 
     sugov_get_util(&util, &max, sg_cpu->cpu);
-    
-    /* 只在util不高时才做iowait_boost，避免拉低高频 */
-    if (util < max * 3 / 4)
-        sugov_iowait_boost(sg_cpu, &util, &max);
-    
+    sugov_iowait_boost(sg_cpu, &util, &max);
     next_f = get_next_freq(sg_policy, util, max);
 
-    /* 降频保护：仅在要降频且CPU繁忙时阻止 */
+    /*
+     * 高频保持：如果之前在高频状态，短时间内不要快速降频
+     * 这能解决 boost 后频率立即回落的问题
+     */
     if (next_f < sg_policy->next_freq && sg_policy->next_freq != UINT_MAX) {
+        /*
+         * 之前跑在高频，现在要降频
+         * 检查是否在高频保持时间内
+         */
+        if (sg_policy->next_freq > policy->cpuinfo.max_freq * 3 / 4) {
+            u64 hold_time = time - sg_policy->last_freq_update_time;
+            
+            if (hold_time < SUGOV_HIGH_FREQ_HOLD_NS) {
+                /* 还在保持时间内，拒绝降频 */
+                next_f = sg_policy->next_freq;
+                sg_policy->cached_raw_freq = 0;
+                goto update;
+            }
+        }
+        
+        /* 正常的降频保护 */
         if (use_pelt() && sugov_cpu_is_busy(sg_cpu)) {
             next_f = sg_policy->next_freq;
             sg_policy->cached_raw_freq = 0;
