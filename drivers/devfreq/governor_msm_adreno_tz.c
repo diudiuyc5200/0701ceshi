@@ -388,22 +388,22 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		val = -1 * level;
 	} else {
 		unsigned int refresh_rate = dsi_panel_get_refresh_rate();
-		unsigned int calc_rr;
+unsigned int calc_rr;
+u64 scaled_busy;
 
-		// 方案1核心：只要高于60，全部强制使用90作为换算基准
-		if (refresh_rate > 60)
-			calc_rr = 90;
-		else
-			calc_rr = 60;
+if (refresh_rate > 60)
+	calc_rr = 90;
+else
+	calc_rr = 60;
 
-		scm_data[0] = level;
-		scm_data[1] = priv->bin.total_time;
-		// 向上取整防止小数丢失，负载计算更准确
-		if (calc_rr > 60)
-			scm_data[2] = div_u64((u64)priv->bin.busy_time * calc_rr + 59, 60);
-		else
-			scm_data[2] = priv->bin.busy_time;
-		scm_data[3] = context_count;
+scm_data[0] = level;
+scaled_busy = (u64)priv->bin.busy_time * calc_rr;
+// 90Hz额外20%负载补偿，专治UI轻负载不上高频
+if (calc_rr == 90)
+	scaled_busy = scaled_busy * 6 / 5;
+
+scm_data[2] = div_u64(scaled_busy + 59, 60);
+scm_data[3] = context_count;
 		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
 					&val, sizeof(val), priv);
 	}
