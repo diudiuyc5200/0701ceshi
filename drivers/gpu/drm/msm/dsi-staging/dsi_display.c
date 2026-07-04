@@ -101,11 +101,13 @@ static int dsi_display_config_clk_gating(struct dsi_display *display,
 		return -EINVAL;
 	}
 
-	// 新增：高刷场景禁止时钟门控，避免滑动闪屏、掉帧
-	u32 curr_fps = display->panel->cur_mode->timing.refresh_rate;
-	if (curr_fps > 60) {
-		pr_debug("%s: high refresh %uHz skip clk gating\n", __func__, curr_fps);
-		return 0;
+	// 增加cur_mode判空
+	if (display->panel && display->panel->cur_mode) {
+		u32 curr_fps = display->panel->cur_mode->timing.refresh_rate;
+		if (curr_fps > 60) {
+			pr_debug("%s: high refresh %uHz skip clk gating\n", __func__, curr_fps);
+			return 0;
+		}
 	}
 
 	if (display->panel->host_config.force_hs_clk_lane) {
@@ -139,7 +141,7 @@ static int dsi_display_config_clk_gating(struct dsi_display *display,
 		rc = dsi_ctrl_config_clk_gating(ctrl->ctrl, enable, PIXEL_CLK);
 		if (rc) {
 			pr_err("[%s] failed to %s pixel clk gating, rc=%d\n",
-				display->name, enable ? "disable" : "disable",
+				display->name, enable ? "enable" : "disable",
 				rc);
 			return rc;
 		}
@@ -812,10 +814,12 @@ int dsi_display_check_status(struct drm_connector *connector, void *display,
 
 	panel = dsi_display->panel;
 
-	// 新增：高刷场景跳过寄存器ESD读取，减少总线抢占、滑动不卡顿
-	u32 curr_fps = panel->cur_mode->timing.refresh_rate;
-	if (curr_fps > 60) {
-		goto release_panel_lock;
+	// 判空保护
+	if (panel->cur_mode) {
+		u32 curr_fps = panel->cur_mode->timing.refresh_rate;
+		if (curr_fps > 60) {
+			goto release_panel_lock;
+		}
 	}
 
 	dsi_panel_acquire_panel_lock(panel);
@@ -1953,11 +1957,13 @@ static int dsi_display_set_ulps(struct dsi_display *display, bool enable)
 		return -EINVAL;
 	}
 
-	// 新增：高刷新率屏幕禁止进入ULPS，滑动无唤醒延迟
-	u32 curr_fps = display->panel->cur_mode->timing.refresh_rate;
-	if (enable && curr_fps > 60) {
-		pr_debug("%s: High refresh %uHz, skip ULPS enter\n", __func__, curr_fps);
-		return 0;
+	// 修复：先判断cur_mode非空再读刷新率
+	if (enable && display->panel && display->panel->cur_mode) {
+		u32 curr_fps = display->panel->cur_mode->timing.refresh_rate;
+		if (curr_fps > 60) {
+			pr_debug("%s: High refresh %uHz, skip ULPS enter\n", __func__, curr_fps);
+			return 0;
+		}
 	}
 
 	if (!dsi_display_is_ulps_req_valid(display, enable)) {
@@ -1987,7 +1993,7 @@ static int dsi_display_set_ulps(struct dsi_display *display, bool enable)
 	else if (rc == DSI_PHY_ULPS_HANDLED) {
 		display_for_each_ctrl(i, display) {
 			ctrl = &display->ctrl[i];
-			if (!ctrl->ctrl || (ctrl == m_ctrl))
+			if (!ctrl || (ctrl == m_ctrl))
 				continue;
 
 			rc = dsi_phy_set_ulps(ctrl->phy, &display->config,
@@ -2009,7 +2015,7 @@ static int dsi_display_set_ulps(struct dsi_display *display, bool enable)
 		}
 		display_for_each_ctrl(i, display) {
 			ctrl = &display->ctrl[i];
-			if (!ctrl->ctrl || (ctrl == m_ctrl))
+			if (!ctrl || (ctrl == m_ctrl))
 				continue;
 
 			rc = dsi_ctrl_set_ulps(ctrl->ctrl, enable);
@@ -7120,11 +7126,13 @@ static void dsi_display_handle_fifo_underflow(struct work_struct *work)
 		return;
 	}
 
-	// 新增高刷判断：90/120Hz滑动时FIFO欠载不做软复位，防止掉帧撕裂
-	u32 curr_fps = display->panel->cur_mode->timing.refresh_rate;
-	if (curr_fps > 60) {
-		pr_debug("%s: High refresh %uHz, skip fifo soft reset\n", __func__, curr_fps);
-		return;
+	// 判空保护
+	if (display->panel->cur_mode) {
+		u32 curr_fps = display->panel->cur_mode->timing.refresh_rate;
+		if (curr_fps > 60) {
+			pr_debug("%s: High refresh %uHz, skip fifo soft reset\n", __func__, curr_fps);
+			return;
+		}
 	}
 
 	mutex_lock(&display->display_lock);
