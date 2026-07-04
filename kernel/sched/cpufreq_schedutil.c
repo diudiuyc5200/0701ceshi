@@ -209,20 +209,11 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
                                   unsigned long util, unsigned long max)
 {
     struct cpufreq_policy *policy = sg_policy->policy;
-    unsigned int base_freq, freq;
+    unsigned int freq;
 
-    // 基准频率
-    base_freq = arch_scale_freq_invariant() ? 
-                policy->cpuinfo.max_freq : policy->cur;
+    freq = (unsigned int)((unsigned long long)policy->cpuinfo.max_freq * util / max);
 
-    // 计算目标频率：util * 1.25 * base_freq / max
-    freq = (unsigned int)((unsigned long long)base_freq * 5 / 4 * util / max);
-    
-    trace_sugov_next_freq(policy->cpu, util, max, freq);
-
-    // 缓存命中优化
-    if (freq == sg_policy->cached_raw_freq && 
-        sg_policy->next_freq != UINT_MAX)
+    if (freq == sg_policy->cached_raw_freq && sg_policy->next_freq != UINT_MAX)
         return sg_policy->next_freq;
 
     sg_policy->cached_raw_freq = freq;
@@ -232,29 +223,22 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 static void sugov_get_util(unsigned long *util, unsigned long *max, int cpu)
 {
     struct rq *rq = cpu_rq(cpu);
-    unsigned long capacity = arch_scale_cpu_capacity(NULL, cpu);
+    struct sugov_cpu *loadcpu = &per_cpu(sugov_cpu, cpu);
     unsigned long cfs_util, boosted_util;
 
-    *max = capacity;
-    
-    cfs_util = min_t(unsigned long, rq->cfs.avg.util_avg, capacity);
-    boosted_util = boosted_cpu_util(cpu, 
-                                    &per_cpu(sugov_cpu, cpu).walt_load);
+    *max = arch_scale_cpu_capacity(NULL, cpu);
 
-    // 触摸时boost值远大于cfs，直接选最大值即可快速拉升
+    cfs_util = min_t(unsigned long, rq->cfs.avg.util_avg, *max);
+    boosted_util = boosted_cpu_util(cpu, &loadcpu->walt_load);
+
+    /* 取较大值，确保触摸boost能生效 */
     *util = max(cfs_util, boosted_util);
-    
-    // 可选：对boost场景做激进的频率拉升
-    if (unlikely(boosted_util > (capacity * 3 / 4))) {
-        // boost很高时，直接设到接近max，加速拉升
-        *util = max(*util, capacity * 7 / 8);
-    }
 
 #ifdef CONFIG_UCLAMP_TASK
     *util = uclamp_util_with(rq, *util, NULL);
 #endif
-    
-    *util = min_t(unsigned long, *util, capacity);
+
+    *util = min_t(unsigned long, *util, *max);
 }
 
 static void sugov_set_iowait_boost(struct sugov_cpu *sg_cpu, u64 time,
@@ -340,35 +324,27 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
     sugov_set_iowait_boost(sg_cpu, time, flags);
     sg_cpu->last_update = time;
 
-    // 频率更新间隔检查
     if (!sugov_should_update_freq(sg_policy, time))
         return;
 
-    // RT/DL任务：立即最大频率
     if (flags & SCHED_CPUFREQ_RT_DL) {
         next_f = policy->cpuinfo.max_freq;
-        goto commit;
+        goto update;
     }
 
-    // 计算目标频率
     sugov_get_util(&util, &max, sg_cpu->cpu);
     sugov_iowait_boost(sg_cpu, &util, &max);
     next_f = get_next_freq(sg_policy, util, max);
 
-    /*
-     * 优化降频逻辑：
-     * 1. 升频（触摸场景）：无条件通过
-     * 2. 降频：仅在CPU连续繁忙时阻止
-     */
-    if (unlikely(next_f < sg_policy->next_freq) && 
-        likely(sg_policy->next_freq != UINT_MAX)) {
+    /* 降频保护：仅在要降频且CPU繁忙时阻止 */
+    if (next_f < sg_policy->next_freq && sg_policy->next_freq != UINT_MAX) {
         if (use_pelt() && sugov_cpu_is_busy(sg_cpu)) {
             next_f = sg_policy->next_freq;
             sg_policy->cached_raw_freq = 0;
         }
     }
 
-commit:
+update:
     sugov_update_commit(sg_policy, time, next_f);
 }
 
