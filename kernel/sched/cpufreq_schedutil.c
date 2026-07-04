@@ -231,7 +231,15 @@ static void sugov_get_util(unsigned long *util, unsigned long *max, int cpu)
     cfs_util = min_t(unsigned long, rq->cfs.avg.util_avg, *max);
     boosted_util = boosted_cpu_util(cpu, &loadcpu->walt_load);
 
-    /* 取较大值，确保触摸boost能生效 */
+    /*
+     * boost明显高于正常负载时，直接给满util
+     * 不给任何机制机会去限制它
+     */
+    if (boosted_util > max(cfs_util, *max / 2)) {
+        *util = *max;
+        return;
+    }
+
     *util = max(cfs_util, boosted_util);
 
 #ifdef CONFIG_UCLAMP_TASK
@@ -333,7 +341,11 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
     }
 
     sugov_get_util(&util, &max, sg_cpu->cpu);
-    sugov_iowait_boost(sg_cpu, &util, &max);
+    
+    /* 只在util不高时才做iowait_boost，避免拉低高频 */
+    if (util < max * 3 / 4)
+        sugov_iowait_boost(sg_cpu, &util, &max);
+    
     next_f = get_next_freq(sg_policy, util, max);
 
     /* 降频保护：仅在要降频且CPU繁忙时阻止 */
