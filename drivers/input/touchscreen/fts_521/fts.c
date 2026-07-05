@@ -4607,11 +4607,16 @@ static void fts_restore_freq(struct work_struct *work)
 
     policy = cpufreq_cpu_get(cpu);
     if (policy) {
-        pr_info("FTS: Restoring CPU7 min to %u\n", saved_min_freq);
+        pr_info("FTS: Restoring CPU7 to original\n");
+
+        /* 恢复 governor 控制 */
         policy->min = saved_min_freq;
         policy->user_policy.min = saved_min_freq;
         cpufreq_update_policy(cpu);
-        /* 恢复时保留 msleep，但无需在锁内长时间持有 */
+
+        /* 或者直接设置回较低频率 */
+        /* cpufreq_driver_target(policy, saved_min_freq, CPUFREQ_RELATION_H); */
+
         cpufreq_cpu_put(policy);
     }
 
@@ -4645,14 +4650,15 @@ static void fts_apply_boost(struct work_struct *work)
         pr_info("FTS: Saved original min=%u\n", saved_min_freq);
     }
 
-    /* 直接设置，不 msleep，减少锁持有时间 */
-    policy->min = target_freq;
-    policy->user_policy.min = target_freq;
-    cpufreq_update_policy(cpu);
+    pr_info("FTS: Direct set CPU7 to %u\n", target_freq);
+
+    /* 直接设置目标频率，不通过 governor */
+    cpufreq_driver_target(policy, target_freq, CPUFREQ_RELATION_H);
+
+    cpufreq_cpu_put(policy);
 
     boost_active = 1;
 
-    cpufreq_cpu_put(policy);
     mutex_unlock(&boost_mutex);
 }
 
