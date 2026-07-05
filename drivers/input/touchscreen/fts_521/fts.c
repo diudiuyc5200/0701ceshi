@@ -4588,7 +4588,10 @@ static void fts_ts_sleep_work(struct work_struct *work)
 /*
  * 恢复 CPU7 频率到原始值
  */
-static void fts_restore_freq(void)
+/*
+ * 恢复 CPU7 频率到原始值
+ */
+static void fts_restore_freq(struct work_struct *work)  /* 添加参数 */
 {
     struct cpufreq_policy *policy;
     int cpu = 7;
@@ -4619,11 +4622,14 @@ static void fts_restore_freq(void)
 /*
  * 提升 CPU7 到最高频率
  */
-static void fts_apply_boost(void)
+/*
+ * 提升 CPU7 到最高频率
+ */
+static void fts_apply_boost(struct work_struct *work)  /* 添加参数 */
 {
     struct cpufreq_policy *policy;
     int cpu = 7;
-    unsigned int target_freq = 2841600;  /* 2.84GHz (SM8150 CPU7 安全频率) */
+    unsigned int target_freq = 2841600;
 
     mutex_lock(&boost_mutex);
 
@@ -4663,18 +4669,6 @@ static void fts_restore_timeout(struct timer_list *t)
     pr_info("FTS: Restore timeout, force restoring\n");
     schedule_work(&fts_restore_work);
 }
-
-/* 工作队列 handler */
-static void fts_boost_work_handler(struct work_struct *work)
-{
-    fts_apply_boost();
-}
-
-static void fts_restore_work_handler(struct work_struct *work)
-{
-    fts_restore_freq();
-}
-
 /* ===== 触摸频率提升代码结束 ===== */
 
 /**
