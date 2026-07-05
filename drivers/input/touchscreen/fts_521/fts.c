@@ -3595,6 +3595,7 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 	u8 touchType;
 	int area_size;
 /* 立即升频 */
+cancel_delayed_work_sync(&fts_restore_delayed_work);
 schedule_work_on(7, &fts_boost_work);
 #ifdef CONFIG_INPUT_PRESS_NDT
 	int forcekey_code = -1;
@@ -3756,7 +3757,7 @@ static void fts_leave_pointer_event_handler(struct fts_ts_info *info,
 	unsigned int tool = MT_TOOL_FINGER;
 	unsigned int touch_condition = 0;
 	u8 touchType;
-schedule_work_on(7, &fts_restore_work);
+schedule_delayed_work(&fts_restore_delayed_work, msecs_to_jiffies(500));
     /* ===== END ===== */
 #ifdef CONFIG_FTS_FOD_AREA_REPORT
 	int x, y;
@@ -3856,7 +3857,7 @@ schedule_work_on(7, &fts_restore_work);
 	
 		/* 所有手指都抬起时 - 恢复 CPU7 频率 */
 	if (info->touch_id == 0 && boost_active) {
-	    schedule_work(&fts_restore_work);
+	    schedule_delayed_work(&fts_restore_delayed_work, msecs_to_jiffies(800));
 	}
 	if (fod_up)
 		logError(1,
@@ -7879,7 +7880,7 @@ static int fts_remove(struct spi_device *client)
 		/* 清理触摸频率提升相关 */
 	del_timer_sync(&fts_restore_timer);
 	flush_work(&fts_boost_work);
-	flush_work(&fts_restore_work);
+	flush_delayed_work(&fts_restore_delayed_work);
 	
 	/*backlight_unregister_notifier(&info->bl_notifier);*/
 	pm_qos_remove_request(&info->pm_qos_req);
