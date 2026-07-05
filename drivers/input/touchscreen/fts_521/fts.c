@@ -155,10 +155,12 @@ static u8 key_mask;
 extern spinlock_t fts_int;
 struct fts_ts_info *fts_info;
 
+/* 触摸频率提升相关 */
+static struct work_struct fts_boost_work;
+static struct work_struct fts_restore_work;
 static struct timer_list fts_keep_high_timer;
 static int boost_active = 0;
 static unsigned int saved_max_freq[8];
-static unsigned int saved_min_freq[8];
 static DEFINE_MUTEX(boost_mutex);
 
 static int fts_init_sensing(struct fts_ts_info *info);
@@ -3587,13 +3589,11 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 					    unsigned char *event)
 {
 schedule_work(&fts_boost_work);
-
 	unsigned char touchId;
 	unsigned int touch_condition = 1, tool = MT_TOOL_FINGER;
 	int x, y, z, distance;
 	u8 touchType;
 	int area_size;
-	
 #ifdef CONFIG_INPUT_PRESS_NDT
 	int forcekey_code = -1;
 #endif
@@ -3839,8 +3839,8 @@ static void fts_leave_pointer_event_handler(struct fts_ts_info *info,
 		info->fod_pressed = false;
 		input_report_key(info->input_dev, BTN_INFO, 0);
 		finger_report_flag = false;
-
 schedule_work(&fts_restore_work);
+
 #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
 		wake_up(&info->wait_queue);
 #endif
@@ -4496,6 +4496,139 @@ static void buffDump(unsigned char *buf, unsigned int buflength, char *tag)
 }
 */
 
+/*
+ * 触摸频率提升 - 强制设置 CPU 频率
+ */
+static void fts_force_freq(int cpu, unsigned int max_freq)
+{
+    struct cpufreq_policy *policy;
+    char path[128];
+    char buf[16];
+    struct file *file;
+    loff_t pos = 0;
+
+    /* 方法1：通过 cpufreq API */
+    policy = cpufreq_cpu_get(cpu);
+    if (policy) {
+        policy->min = max_freq;
+        policy->max = max_freq;
+        policy->user_policy.min = max_freq;
+        policy->user_policy.max = max_freq;
+        cpufreq_update_policy(cpu);
+        cpufreq_cpu_put(policy);
+    }
+
+    /* 方法2：直接写 scaling_max_freq */
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpufreq/policy%d/scaling_max_freq", cpu);
+    file = filp_open(path, O_WRONLY, 0);
+    if (!IS_ERR(file)) {
+        snprintf(buf, sizeof(buf), "%u", max_freq);
+        kernel_write(file, buf, strlen(buf), &pos);
+        filp_close(file, NULL);
+    }
+
+    /* 方法3：直接写 scaling_min_freq */
+    pos = 0;
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpufreq/policy%d/scaling_min_freq", cpu);
+    file = filp_open(path, O_WRONLY, 0);
+    if (!IS_ERR(file)) {
+        snprintf(buf, sizeof(buf), "%u", max_freq);
+        kernel_write(file, buf, strlen(buf), &pos);
+        filp_close(file, NULL);
+    }
+}
+
+/* 定时器回调：持续刷新频率 */
+static void fts_keep_high_timer_callback(struct timer_list *t)
+{
+    int cpu;
+    unsigned int max_freq_table[8] = {
+        1785600, 1785600, 1785600, 1785600,
+        2419200, 2419200, 2419200,
+        2956800
+    };
+
+    if (!boost_active)
+        return;
+
+    for (cpu = 0; cpu < 8; cpu++) {
+        fts_force_freq(cpu, max_freq_table[cpu]);
+    }
+
+    /* 每 100ms 刷新一次 */
+    mod_timer(&fts_keep_high_timer, jiffies + msecs_to_jiffies(100));
+}
+
+/* 工作队列：触摸按下升频 */
+static void fts_boost_work_handler(struct work_struct *work)
+{
+    int cpu;
+    unsigned int max_freq_table[8] = {
+        1785600, 1785600, 1785600, 1785600,
+        2419200, 2419200, 2419200,
+        2956800
+    };
+    struct cpufreq_policy *policy;
+
+    mutex_lock(&boost_mutex);
+    if (boost_active) {
+        mutex_unlock(&boost_mutex);
+        return;
+    }
+
+    pr_info("FTS: Touch boost START\n");
+
+    /* 保存原始 max 值 */
+    for (cpu = 0; cpu < 8; cpu++) {
+        policy = cpufreq_cpu_get(cpu);
+        if (policy) {
+            saved_max_freq[cpu] = policy->max;
+            cpufreq_cpu_put(policy);
+        }
+    }
+
+    /* 强制所有 CPU 到最高频率 */
+    for (cpu = 0; cpu < 8; cpu++) {
+        fts_force_freq(cpu, max_freq_table[cpu]);
+    }
+
+    boost_active = 1;
+
+    /* 启动定时器，每 100ms 刷新一次 */
+    mod_timer(&fts_keep_high_timer, jiffies + msecs_to_jiffies(100));
+
+    mutex_unlock(&boost_mutex);
+}
+
+/* 工作队列：触摸释放恢复频率 */
+static void fts_restore_work_handler(struct work_struct *work)
+{
+    int cpu;
+
+    mutex_lock(&boost_mutex);
+    if (!boost_active) {
+        mutex_unlock(&boost_mutex);
+        return;
+    }
+
+    pr_info("FTS: Touch boost STOP\n");
+
+    /* 停止定时器 */
+    del_timer_sync(&fts_keep_high_timer);
+
+    /* 恢复原始频率 */
+    for (cpu = 0; cpu < 8; cpu++) {
+        if (saved_max_freq[cpu] > 0) {
+            fts_force_freq(cpu, saved_max_freq[cpu]);
+        }
+    }
+
+    boost_active = 0;
+    mutex_unlock(&boost_mutex);
+}
+
 static void fts_ts_sleep_work(struct work_struct *work)
 {
 	struct fts_ts_info *info = container_of(work, struct fts_ts_info, sleep_work);
@@ -4580,133 +4713,6 @@ static void fts_ts_sleep_work(struct work_struct *work)
  * This handler is called each time there is at least one new event in the FIFO and the interrupt pin of the IC goes low.
  * It will read all the events from the FIFO and dispatch them to the proper event handler according the event ID
  */
- 
- static void fts_force_freq(int cpu, unsigned int max_freq)
-{
-    struct cpufreq_policy *policy;
-    char path[128];
-    char buf[16];
-    struct file *file;
-    loff_t pos = 0;
-
-    /* 方法1：通过 cpufreq API */
-    policy = cpufreq_cpu_get(cpu);
-    if (policy) {
-        policy->min = max_freq;
-        policy->max = max_freq;
-        policy->user_policy.min = max_freq;
-        policy->user_policy.max = max_freq;
-        cpufreq_update_policy(cpu);
-        cpufreq_cpu_put(policy);
-    }
-
-    /* 方法2：直接写 scaling_max_freq */
-    snprintf(path, sizeof(path),
-             "/sys/devices/system/cpu/cpufreq/policy%d/scaling_max_freq", cpu);
-    file = filp_open(path, O_WRONLY, 0);
-    if (!IS_ERR(file)) {
-        snprintf(buf, sizeof(buf), "%u", max_freq);
-        kernel_write(file, buf, strlen(buf), &pos);
-        filp_close(file, NULL);
-    }
-
-    /* 方法3：直接写 scaling_min_freq */
-    pos = 0;
-    snprintf(path, sizeof(path),
-             "/sys/devices/system/cpu/cpufreq/policy%d/scaling_min_freq", cpu);
-    file = filp_open(path, O_WRONLY, 0);
-    if (!IS_ERR(file)) {
-        snprintf(buf, sizeof(buf), "%u", max_freq);
-        kernel_write(file, buf, strlen(buf), &pos);
-        filp_close(file, NULL);
-    }
-}
-
-static void fts_keep_high_timer_callback(struct timer_list *t)
-{
-    int cpu;
-    unsigned int max_freq_table[8] = {
-        1785600, 1785600, 1785600, 1785600,
-        2419200, 2419200, 2419200,
-        2956800
-    };
-
-    if (!boost_active)
-        return;
-
-    /* 每 100ms 刷新一次所有 CPU 的频率 */
-    for (cpu = 0; cpu < 8; cpu++) {
-        fts_force_freq(cpu, max_freq_table[cpu]);
-    }
-
-    /* 重新触发定时器 */
-    mod_timer(&fts_keep_high_timer, jiffies + msecs_to_jiffies(100));
-}
-
-static void fts_boost_work_handler(struct work_struct *work)
-{
-    int cpu;
-    struct cpufreq_policy *policy;
-
-    mutex_lock(&boost_mutex);
-    if (boost_active) {
-        mutex_unlock(&boost_mutex);
-        return;
-    }
-
-    pr_info("FTS: Touch boost START\n");
-
-    /* 保存原始值并强制设置高频 */
-    for (cpu = 0; cpu < 8; cpu++) {
-        policy = cpufreq_cpu_get(cpu);
-        if (policy) {
-            saved_max_freq[cpu] = policy->max;
-            saved_min_freq[cpu] = policy->min;
-            cpufreq_cpu_put(policy);
-        }
-    }
-
-    /* 强制所有 CPU 到最高频率 */
-    for (cpu = 0; cpu < 8; cpu++) {
-        unsigned int max_freq = (cpu <= 3) ? 1785600 :
-                                (cpu <= 6) ? 2419200 : 2956800;
-        fts_force_freq(cpu, max_freq);
-    }
-
-    boost_active = 1;
-
-    /* 启动定时器，每 100ms 刷新一次 */
-    mod_timer(&fts_keep_high_timer, jiffies + msecs_to_jiffies(100));
-
-    mutex_unlock(&boost_mutex);
-}
-
-static void fts_restore_work_handler(struct work_struct *work)
-{
-    int cpu;
-
-    mutex_lock(&boost_mutex);
-    if (!boost_active) {
-        mutex_unlock(&boost_mutex);
-        return;
-    }
-
-    pr_info("FTS: Touch boost STOP\n");
-
-    /* 停止定时器 */
-    del_timer_sync(&fts_keep_high_timer);
-
-    /* 恢复原始频率 */
-    for (cpu = 0; cpu < 8; cpu++) {
-        if (saved_max_freq[cpu] > 0) {
-            fts_force_freq(cpu, saved_max_freq[cpu]);
-        }
-    }
-
-    boost_active = 0;
-    mutex_unlock(&boost_mutex);
-}
-
 static irqreturn_t fts_event_handler(int irq, void *ts_info)
 {
 	struct fts_ts_info *info = ts_info;
@@ -7469,7 +7475,8 @@ static int fts_probe(struct spi_device *client)
 	INIT_WORK(&info->resume_work, fts_resume_work);
 	INIT_WORK(&info->suspend_work, fts_suspend_work);
 	INIT_WORK(&info->sleep_work, fts_ts_sleep_work);
-	INIT_WORK(&fts_boost_work, fts_boost_work_handler);
+	/* 初始化触摸频率提升相关 */
+INIT_WORK(&fts_boost_work, fts_boost_work_handler);
 INIT_WORK(&fts_restore_work, fts_restore_work_handler);
 timer_setup(&fts_keep_high_timer, fts_keep_high_timer_callback, 0);
 	init_completion(&info->tp_reset_completion);
@@ -7875,6 +7882,10 @@ static int fts_remove(struct spi_device *client)
 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
 	/* remove interrupt and event handlers */
 	fts_interrupt_uninstall(info);
+	/* 清理触摸频率提升相关 */
+    del_timer_sync(&fts_keep_high_timer);
+    flush_work(&fts_boost_work);
+    flush_work(&fts_restore_work);
 	/*backlight_unregister_notifier(&info->bl_notifier);*/
 	pm_qos_remove_request(&info->pm_qos_req);
 #ifdef CONFIG_DRM
