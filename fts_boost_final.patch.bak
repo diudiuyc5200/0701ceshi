@@ -1,0 +1,168 @@
+
+@@ -30,6 30,11 @@
+ #include <linux/backlight.h>
+ #include <linux/fb.h>
+ #include <linux/proc_fs.h>
+#include <linux/cpufreq.h>
+#include <linux/workqueue.h>
+#include <linux/timer.h>
+#include <linux/mutex.h>
+#include <linux/sched.h>
+ #include <linux/uaccess.h>
+ #include <linux/debugfs.h>
+ 
+@@ -47,6 52,15 @@
+ 
+ extern spinlock_t fts_int;
+ struct fts_ts_info *fts_info;
+
+/* 触摸频率提升 - 最终稳定版 */
+static struct work_struct fts_boost_work;
+static struct work_struct fts_restore_work;
+static struct timer_list fts_restore_timer;
+static unsigned int saved_min_freq = 0;
+static int boost_active = 0;
+static DEFINE_MUTEX(boost_mutex);
+static struct cpufreq_policy *cached_policy = NULL; /* 仅用于调试 */
+ 
+ static int fts_init_sensing(struct fts_ts_info *info);
+ static int fts_mode_handler(struct fts_ts_info *info, int force);
+@@ -2900,6 2914,78 @@
+ 	return;
+ }
+ 
+/* ===== 触摸频率提升代码开始 ===== */
+
+/*
+ * 恢复 CPU7 频率到原始值
+ */
+static void fts_restore_freq(void)
+{
+    struct cpufreq_policy *policy;
+    int cpu = 7;
+
+    mutex_lock(&boost_mutex);
+    if (!boost_active || !saved_min_freq) {
+        mutex_unlock(&boost_mutex);
+        return;
+    }
+
+    policy = cpufreq_cpu_get(cpu);
+    if (policy) {
+        pr_info("FTS: Restoring CPU7 min to %u\n", saved_min_freq);
+        policy->min = saved_min_freq;
+        policy->user_policy.min = saved_min_freq;
+        cpufreq_update_policy(cpu);
+        msleep(20);
+        pr_info("FTS: CPU7 after restore: cur=%u\n", policy->cur);
+        cpufreq_cpu_put(policy);
+    } else {
+        pr_warn("FTS: CPU7 policy not found for restore\n");
+    }
+
+    boost_active = 0;
+    mutex_unlock(&boost_mutex);
+}
+
+/*
+ * 提升 CPU7 到最高频率
+ */
+static void fts_apply_boost(void)
+{
+    struct cpufreq_policy *policy;
+    int cpu = 7;
+
+    mutex_lock(&boost_mutex);
+
+    policy = cpufreq_cpu_get(cpu);
+    if (!policy) {
+        pr_warn("FTS: CPU7 policy not found\n");
+        mutex_unlock(&boost_mutex);
+        return;
+    }
+
+    if (saved_min_freq == 0) {
+        saved_min_freq = policy->min;
+        pr_info("FTS: Saved original min=%u\n", saved_min_freq);
+    }
+
+    pr_info("FTS: CPU7 boosting to max=%u\n", policy->cpuinfo.max_freq);
+
+    policy->min = policy->cpuinfo.max_freq;
+    policy->user_policy.min = policy->cpuinfo.max_freq;
+    cpufreq_update_policy(cpu);
+
+    msleep(20);
+    pr_info("FTS: CPU7 after boost: cur=%u\n", policy->cur);
+
+    cpufreq_cpu_put(policy);
+
+    boost_active = 1;
+
+    mutex_unlock(&boost_mutex);
+}
+
+/* ===== 触摸频率提升代码结束 ===== */
+
+@@ -2985,6 3071,10 @@
+             if (evt_data[0] == EVT_ID_NOEVENT)
+                 break;
+ 
+            /* 触摸按下 - 提升 CPU7 频率 */
+            if (evt_data[0] == EVT_ID_ENTER_POINT || evt_data[0] == EVT_ID_MOTION_POINT) {
+                schedule_work(&fts_boost_work);
+            }
+
+             eventId = evt_data[0] >> 4;
+             /*Ensure event ID is within bounds*/
+             if (eventId < NUM_EVT_ID) {
+@@ -3103,6 3193,10 @@
+             if (evt_data[0] == EVT_ID_NOEVENT)
+                 break;
+ 
+            /* 触摸按下（休眠时） - 提升 CPU7 频率 */
+            if (evt_data[0] == EVT_ID_ENTER_POINT || evt_data[0] == EVT_ID_MOTION_POINT) {
+                schedule_work(&fts_boost_work);
+            }
+
+             eventId = evt_data[0] >> 4;
+             /*Ensure event ID is within bounds*/
+             if (eventId < NUM_EVT_ID) {
+@@ -4804,6 4898,11 @@
+ 		info->fod_id = 0;
+ 	}
+ 	input_report_abs(info->input_dev, ABS_MT_TRACKING_ID, -1);
+
+	/* 所有手指都抬起时 - 恢复 CPU7 频率 */
+	if (info->touch_id == 0 && boost_active) {
+	    schedule_work(&fts_restore_work);
+	}
+ 	if (fod_up)
+ 		logError(1,
+ 			"%s  %s :  Event FOD - release ID[%d] type = %d\n", tag,
+@@ -5000,6 5099,12 @@
+ 	INIT_WORK(&info->resume_work, fts_resume_work);
+ 	INIT_WORK(&info->suspend_work, fts_suspend_work);
+ 	INIT_WORK(&info->sleep_work, fts_ts_sleep_work);
+
+	/* 初始化触摸频率提升相关 */
+	INIT_WORK(&fts_boost_work, fts_apply_boost);
+	INIT_WORK(&fts_restore_work, fts_restore_freq);
+	timer_setup(&fts_restore_timer, fts_restore_timeout, 0);
+
+ 	init_completion(&info->tp_reset_completion);
+ #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
+ 	init_waitqueue_head(&info->wait_queue);
+@@ -5400,6 5505,11 @@
+ 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
+ 	/* remove interrupt and event handlers */
+ 	fts_interrupt_uninstall(info);
+
+	/* 清理触摸频率提升相关 */
+	del_timer_sync(&fts_restore_timer);
+	flush_work(&fts_boost_work);
+	flush_work(&fts_restore_work);
+
+ 	/*backlight_unregister_notifier(&info->bl_notifier);*/
+ 	pm_qos_remove_request(&info->pm_qos_req);
+ #ifdef CONFIG_DRM
