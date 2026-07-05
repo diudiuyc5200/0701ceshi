@@ -32,18 +32,18 @@ static DEFINE_SPINLOCK(suspend_lock);
  * FLOOR is 5msec to capture up to 3 re-draws
  * per frame for 60fps content.
  */
-#define FLOOR		        3000
+#define FLOOR		        1000
 /*
  * MIN_BUSY is 1 msec for the sample to be sent
  */
-#define MIN_BUSY		500
+#define MIN_BUSY		100
 #define MAX_TZ_VERSION		0
 
 /*
  * CEILING is 50msec, larger than any standard
  * frame length, but less than the idle timer.
  */
-#define CEILING			30000
+#define CEILING			15000
 #define TZ_RESET_ID		0x3
 #define TZ_UPDATE_ID		0x4
 #define TZ_INIT_ID		0x6
@@ -400,7 +400,7 @@ scm_data[0] = level;
 scaled_busy = (u64)priv->bin.busy_time * calc_rr;
 // 90Hz额外20%负载补偿，专治UI轻负载不上高频
 if (calc_rr == 90)
-	scaled_busy = scaled_busy * 6 / 5;
+	scaled_busy = scaled_busy * 3 / 2;
 
 scm_data[2] = div_u64(scaled_busy + 59, 60);
 scm_data[3] = context_count;
