@@ -810,6 +810,28 @@ struct cpufreq_governor *cpufreq_default_governor(void)
 }
 #endif
 
+/*
+ * Export interface for external modules (e.g., touch driver) to trigger
+ * IOWAIT boost, which will ramp up the CPU frequency quickly.
+ */
+void sugov_trigger_iowait_boost(int cpu)
+{
+	struct sugov_cpu *sg_cpu = &per_cpu(sugov_cpu, cpu);
+	struct sugov_policy *sg_policy = sg_cpu->sg_policy;
+	unsigned long flags;
+
+	if (!sg_policy)
+		return;
+
+	raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
+	
+	sg_cpu->iowait_boost_pending = true;
+	sg_cpu->iowait_boost = sg_policy->policy->cpuinfo.max_freq;
+	
+	raw_spin_unlock_irqrestore(&sg_policy->update_lock, flags);
+}
+EXPORT_SYMBOL_GPL(sugov_trigger_iowait_boost);
+
 static int __init sugov_register(void)
 {
 	return cpufreq_register_governor(&schedutil_gov);

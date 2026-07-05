@@ -29,7 +29,7 @@
 * \brief It is the main file which contains all the most important functions generally used by a device driver the driver
 */
 #include <linux/device.h>
-
+#include <linux/cpufreq.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -83,6 +83,8 @@
 #include "fts_lib/ftsTest.h"
 #include "fts_lib/ftsTime.h"
 #include "fts_lib/ftsTool.h"
+
+extern void sugov_trigger_iowait_boost(int cpu);
 
 /**
  * Event handler installer helpers
@@ -4537,6 +4539,14 @@ static void fts_ts_sleep_work(struct work_struct *work)
 			}
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
+				
+				    /* ===== FTS TOUCH BOOST ===== */
+    if (evt_data[0] == EVT_ID_ENTER_POINT || 
+        evt_data[0] == EVT_ID_MOTION_POINT) {
+        sugov_trigger_iowait_boost(smp_processor_id());
+    }
+    /* ===== END ===== */
+    
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
 			if (eventId < NUM_EVT_ID) {
@@ -4624,6 +4634,14 @@ static irqreturn_t fts_event_handler(int irq, void *ts_info)
 			}
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
+				
+				/* ===== FTS TOUCH BOOST ===== */
+if (evt_data[0] == EVT_ID_ENTER_POINT || 
+    evt_data[0] == EVT_ID_MOTION_POINT) {
+    sugov_trigger_iowait_boost(smp_processor_id());
+}
+/* ===== END ===== */
+
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
 			if (eventId < NUM_EVT_ID) {
