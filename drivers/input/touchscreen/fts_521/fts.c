@@ -95,6 +95,8 @@
 #define event_id(_e)     (EVT_ID_##_e>>4)
 #define handler_name(_h) fts_##_h##_event_handler
 
+static struct delayed_work fts_restore_delayed_work;
+
 #define install_handler(_i, _evt, _hnd) \
 do { \
 	_i->event_dispatch_table[event_id(_evt)] = handler_name(_hnd); \
@@ -3591,9 +3593,10 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 	int x, y, z, distance;
 	u8 touchType;
 	int area_size;
-	 /* 新增：触摸按下提升频率 */
-    schedule_work(&fts_boost_work);
-    // ... 后面所有原有代码保持不变 ...
+/* 取消待恢复的延迟任务 */
+cancel_delayed_work_sync(&fts_restore_delayed_work);
+/* 立即升频 */
+schedule_work_on(7, &fts_boost_work);
 #ifdef CONFIG_INPUT_PRESS_NDT
 	int forcekey_code = -1;
 #endif
@@ -3754,8 +3757,8 @@ static void fts_leave_pointer_event_handler(struct fts_ts_info *info,
 	unsigned int tool = MT_TOOL_FINGER;
 	unsigned int touch_condition = 0;
 	u8 touchType;
-	/* ===== 触摸抬起 - 恢复 CPU7 频率 ===== */
-    schedule_work(&fts_restore_work);
+/* 延迟 100ms 恢复频率（防抖动） */
+schedule_delayed_work(&fts_restore_delayed_work, msecs_to_jiffies(100));
     /* ===== END ===== */
 #ifdef CONFIG_FTS_FOD_AREA_REPORT
 	int x, y;
@@ -4591,7 +4594,7 @@ static void fts_ts_sleep_work(struct work_struct *work)
 /*
  * 恢复 CPU7 频率到原始值
  */
-static void fts_restore_freq(struct work_struct *work)  /* 添加参数 */
+static void fts_restore_freq(struct work_struct *work)
 {
     struct cpufreq_policy *policy;
     int cpu = 7;
@@ -4608,11 +4611,8 @@ static void fts_restore_freq(struct work_struct *work)  /* 添加参数 */
         policy->min = saved_min_freq;
         policy->user_policy.min = saved_min_freq;
         cpufreq_update_policy(cpu);
-        msleep(20);
-        pr_info("FTS: CPU7 after restore: cur=%u\n", policy->cur);
+        /* 恢复时保留 msleep，但无需在锁内长时间持有 */
         cpufreq_cpu_put(policy);
-    } else {
-        pr_warn("FTS: CPU7 policy not found for restore\n");
     }
 
     boost_active = 0;
@@ -4625,7 +4625,7 @@ static void fts_restore_freq(struct work_struct *work)  /* 添加参数 */
 /*
  * 提升 CPU7 到最高频率
  */
-static void fts_apply_boost(struct work_struct *work)  /* 添加参数 */
+static void fts_apply_boost(struct work_struct *work)
 {
     struct cpufreq_policy *policy;
     int cpu = 7;
@@ -4645,19 +4645,14 @@ static void fts_apply_boost(struct work_struct *work)  /* 添加参数 */
         pr_info("FTS: Saved original min=%u\n", saved_min_freq);
     }
 
-    pr_info("FTS: CPU7 boosting to %u\n", target_freq);
-
+    /* 直接设置，不 msleep，减少锁持有时间 */
     policy->min = target_freq;
     policy->user_policy.min = target_freq;
     cpufreq_update_policy(cpu);
 
-    msleep(20);
-    pr_info("FTS: CPU7 after boost: cur=%u\n", policy->cur);
-
-    cpufreq_cpu_put(policy);
-
     boost_active = 1;
 
+    cpufreq_cpu_put(policy);
     mutex_unlock(&boost_mutex);
 }
 
@@ -4668,6 +4663,10 @@ static void fts_restore_timeout(struct timer_list *t)
 {
     pr_info("FTS: Restore timeout, force restoring\n");
     schedule_work(&fts_restore_work);
+}
+static void fts_restore_freq_delayed(stru,ct work_struct *work)
+{
+    fts_restore_freq(work);
 }
 /* ===== 触摸频率提升代码结束 ===== */
 
@@ -7442,6 +7441,7 @@ static int fts_probe(struct spi_device *client)
 	INIT_WORK(&fts_boost_work, fts_apply_boost);
 	INIT_WORK(&fts_restore_work, fts_restore_freq);
 	timer_setup(&fts_restore_timer, fts_restore_timeout, 0);
+INIT_DELAYED_WORK(&fts_restore_delayed_work, fts_restore_freq);
 	
 	init_completion(&info->tp_reset_completion);
 #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
