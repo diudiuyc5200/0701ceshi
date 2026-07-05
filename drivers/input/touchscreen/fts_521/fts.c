@@ -4664,7 +4664,7 @@ static void fts_restore_timeout(struct timer_list *t)
     pr_info("FTS: Restore timeout, force restoring\n");
     schedule_work(&fts_restore_work);
 }
-static void fts_restore_freq_delayed(stru,ct work_struct *work)
+static void fts_restore_freq_delayed(struct work_struct *work)
 {
     fts_restore_freq(work);
 }
