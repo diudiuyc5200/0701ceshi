@@ -162,6 +162,7 @@ static unsigned int saved_min_freq = 0;
 static int boost_active = 0;
 static DEFINE_MUTEX(boost_mutex);
 static struct cpufreq_policy *cached_policy = NULL; /* 仅用于调试 */
+static unsigned int target_freq = 2841600;  /* 2.84GHz */
 
 static int fts_init_sensing(struct fts_ts_info *info);
 static int fts_mode_handler(struct fts_ts_info *info, int force);
@@ -3593,8 +3594,6 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 	int x, y, z, distance;
 	u8 touchType;
 	int area_size;
-/* 取消待恢复的延迟任务 */
-cancel_delayed_work_sync(&fts_restore_delayed_work);
 /* 立即升频 */
 schedule_work_on(7, &fts_boost_work);
 #ifdef CONFIG_INPUT_PRESS_NDT
@@ -3757,8 +3756,7 @@ static void fts_leave_pointer_event_handler(struct fts_ts_info *info,
 	unsigned int tool = MT_TOOL_FINGER;
 	unsigned int touch_condition = 0;
 	u8 touchType;
-/* 延迟 100ms 恢复频率（防抖动） */
-schedule_delayed_work(&fts_restore_delayed_work, msecs_to_jiffies(100));
+schedule_work_on(7, &fts_restore_work);
     /* ===== END ===== */
 #ifdef CONFIG_FTS_FOD_AREA_REPORT
 	int x, y;
@@ -4607,16 +4605,16 @@ static void fts_restore_freq(struct work_struct *work)
 
     policy = cpufreq_cpu_get(cpu);
     if (policy) {
-        pr_info("FTS: Restoring CPU7 to original\n");
+        pr_info("FTS: CPU7 restore: cur=%u, min=%u, saved_min=%u\n",
+                policy->cur, policy->min, saved_min_freq);
 
-        /* 恢复 governor 控制 */
+        /* 恢复原始 min 值 */
         policy->min = saved_min_freq;
         policy->user_policy.min = saved_min_freq;
         cpufreq_update_policy(cpu);
 
-        /* 或者直接设置回较低频率 */
-        /* cpufreq_driver_target(policy, saved_min_freq, CPUFREQ_RELATION_H); */
-
+        msleep(10);
+        pr_info("FTS: CPU7 after restore: cur=%u\n", policy->cur);
         cpufreq_cpu_put(policy);
     }
 
@@ -4634,7 +4632,7 @@ static void fts_apply_boost(struct work_struct *work)
 {
     struct cpufreq_policy *policy;
     int cpu = 7;
-    unsigned int target_freq = 2841600;
+    int ret;
 
     mutex_lock(&boost_mutex);
 
@@ -4645,21 +4643,46 @@ static void fts_apply_boost(struct work_struct *work)
         return;
     }
 
+    /* 首次保存原始 min 值 */
     if (saved_min_freq == 0) {
         saved_min_freq = policy->min;
         pr_info("FTS: Saved original min=%u\n", saved_min_freq);
     }
 
-    pr_info("FTS: Direct set CPU7 to %u\n", target_freq);
+    pr_info("FTS: CPU7 boost: cur=%u, min=%u, max=%u\n",
+            policy->cur, policy->min, policy->cpuinfo.max_freq);
 
-    /* 直接设置目标频率，不通过 governor */
-    cpufreq_driver_target(policy, target_freq, CPUFREQ_RELATION_H);
+    /* 方法1：直接设置 policy->min（防止 schedutil 降频） */
+    policy->min = target_freq;
+    policy->user_policy.min = target_freq;
 
-    cpufreq_cpu_put(policy);
+    /* 方法2：调用 cpufreq_driver_target（直接设置频率） */
+    ret = cpufreq_driver_target(policy, target_freq, CPUFREQ_RELATION_H);
+    if (ret == 0) {
+        pr_info("FTS: cpufreq_driver_target success\n");
+    } else {
+        pr_warn("FTS: cpufreq_driver_target failed, ret=%d\n", ret);
+        /* 如果 cpufreq_driver_target 失败，至少用 __cpufreq_driver_target 再试 */
+        ret = __cpufreq_driver_target(policy, target_freq, CPUFREQ_RELATION_H);
+        if (ret == 0)
+            pr_info("FTS: __cpufreq_driver_target success\n");
+        else
+            pr_warn("FTS: __cpufreq_driver_target failed, ret=%d\n", ret);
+    }
+
+    /* 强制更新策略（让内核重新评估频率） */
+    cpufreq_update_policy(cpu);
+
+    /* 读取设置后的频率确认 */
+    msleep(10);
+    pr_info("FTS: CPU7 after boost: cur=%u\n", policy->cur);
 
     boost_active = 1;
-
+    cpufreq_cpu_put(policy);
     mutex_unlock(&boost_mutex);
+
+    /* 设置定时器，2秒后恢复（防止释放事件丢失） */
+    mod_timer(&fts_restore_timer, jiffies + msecs_to_jiffies(2000));
 }
 
  /*
