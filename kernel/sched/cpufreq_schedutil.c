@@ -195,13 +195,10 @@ static void sugov_set_iowait_boost(struct sugov_cpu *sg_cpu, u64 time,
 				sg_cpu->iowait_boost = sg_cpu->iowait_boost_max;
 		} else {
 			/*
-			 * PELT优化：从2.0G开始boost
-			 * 首次触摸直接跳到2.0G，而不是从min开始慢慢爬
+			 * 修改：首次触摸直接跳到最高频率
+			 * 不再从 2.0G 开始慢慢翻倍
 			 */
-			unsigned int base_boost = 2016000;  /* 2.016GHz */
-			if (base_boost < sg_cpu->sg_policy->policy->min)
-				base_boost = sg_cpu->sg_policy->policy->min;
-			sg_cpu->iowait_boost = base_boost;
+			sg_cpu->iowait_boost = sg_cpu->iowait_boost_max;
 		}
 	} else if (sg_cpu->iowait_boost) {
 		s64 delta_ns = time - sg_cpu->last_update;
