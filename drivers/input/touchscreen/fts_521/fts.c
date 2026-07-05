@@ -97,7 +97,6 @@
 #define event_id(_e)     (EVT_ID_##_e>>4)
 #define handler_name(_h) fts_##_h##_event_handler
 
-static struct delayed_work fts_restore_delayed_work;
 static struct delayed_work fts_restore_work;
 
 #define install_handler(_i, _evt, _hnd) \
@@ -166,7 +165,7 @@ static int boost_active = 0;
 static DEFINE_MUTEX(boost_mutex);
 static struct cpufreq_policy *cached_policy = NULL; /* 仅用于调试 */
 static unsigned int target_freq = 2841600;  /* 2.84GHz */
-static unsigned int saved_governors[8];  /* 保存每个 CPU 的原始 governor */
+static char saved_governors[8][32];  /* 修正：二维数组，每个 CPU 保存最多 32 字节的 governor 名称 */
 static char gov_schedutil[] = "schedutil";
 static char gov_performance[] = "performance";
 
@@ -4591,7 +4590,7 @@ static void fts_ts_sleep_work(struct work_struct *work)
 	return;
 }
 
-static int fts_write_gov_to_cpu(int cpu, char *gov)
+static int fts_read_gov_from_cpu(int cpu, char *buf, size_t buf_size)
 {
     struct file *file;
     char path[128];
@@ -4601,19 +4600,21 @@ static int fts_write_gov_to_cpu(int cpu, char *gov)
     snprintf(path, sizeof(path),
              "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
 
-    file = filp_open(path, O_WRONLY, 0);
+    file = filp_open(path, O_RDONLY, 0);
     if (IS_ERR(file)) {
-        pr_warn("FTS: Cannot open %s\n", path);
         return PTR_ERR(file);
     }
 
-    ret = kernel_write(file, gov, strlen(gov), &pos);
+    ret = kernel_read(file, buf, buf_size - 1, &pos);
     filp_close(file, NULL);
 
-    if (ret < 0) {
-        pr_warn("FTS: Write to CPU%d failed\n", cpu);
+    if (ret < 0)
         return ret;
-    }
+
+    buf[ret] = '\0';
+    /* 去掉换行符 */
+    if (buf[ret - 1] == '\n')
+        buf[ret - 1] = '\0';
 
     return 0;
 }
@@ -4651,6 +4652,7 @@ static void fts_apply_boost(struct work_struct *work)
 {
     int cpu;
     char current_gov[32];
+    int ret;
 
     mutex_lock(&boost_mutex);
 
@@ -4663,16 +4665,18 @@ static void fts_apply_boost(struct work_struct *work)
 
     for (cpu = 0; cpu < 8; cpu++) {
         /* 读取当前 governor */
-        if (fts_read_gov_from_cpu(cpu, current_gov, sizeof(current_gov)) == 0) {
+        ret = fts_read_gov_from_cpu(cpu, current_gov, sizeof(current_gov));
+        if (ret == 0) {
             strlcpy(saved_governors[cpu], current_gov, sizeof(saved_governors[cpu]));
             pr_info("FTS: CPU%d saved gov: %s\n", cpu, saved_governors[cpu]);
         } else {
             /* 读取失败，默认用 schedutil */
             strlcpy(saved_governors[cpu], "schedutil", sizeof(saved_governors[cpu]));
+            pr_info("FTS: CPU%d read failed, default schedutil\n", cpu);
         }
 
         /* 切换到 performance */
-        fts_write_gov_to_cpu(cpu, gov_performance);
+        fts_write_gov_to_cpu(cpu, "performance");
     }
 
     boost_active = 1;
@@ -4704,77 +4708,13 @@ static void fts_restore_freq(struct work_struct *work)
         if (strlen(saved_governors[cpu]) > 0) {
             fts_write_gov_to_cpu(cpu, saved_governors[cpu]);
             pr_info("FTS: CPU%d restored to %s\n", cpu, saved_governors[cpu]);
-            saved_governors[cpu][0] = '\0';
+            saved_governors[cpu][0] = '\0';  /* 清空，方便下次保存 */
         }
     }
 
     boost_active = 0;
     mutex_unlock(&boost_mutex);
 }
-
-/*
- * 提升 CPU7 到最高频率
- */
-/*
- * 提升 CPU7 到最高频率
- */
-static void fts_apply_boost(struct work_struct *work)
-{
-    struct cpufreq_policy *policy;
-    int cpu = 7;
-    int ret;
-
-    mutex_lock(&boost_mutex);
-
-    policy = cpufreq_cpu_get(cpu);
-    if (!policy) {
-        pr_warn("FTS: CPU7 policy not found\n");
-        mutex_unlock(&boost_mutex);
-        return;
-    }
-
-    /* 首次保存原始 min 值 */
-    if (saved_min_freq == 0) {
-        saved_min_freq = policy->min;
-        pr_info("FTS: Saved original min=%u\n", saved_min_freq);
-    }
-
-    pr_info("FTS: CPU7 boost: cur=%u, min=%u, max=%u\n",
-            policy->cur, policy->min, policy->cpuinfo.max_freq);
-
-    /* 方法1：直接设置 policy->min（防止 schedutil 降频） */
-    policy->min = target_freq;
-    policy->user_policy.min = target_freq;
-
-    /* 方法2：调用 cpufreq_driver_target（直接设置频率） */
-    ret = cpufreq_driver_target(policy, target_freq, CPUFREQ_RELATION_H);
-    if (ret == 0) {
-        pr_info("FTS: cpufreq_driver_target success\n");
-    } else {
-        pr_warn("FTS: cpufreq_driver_target failed, ret=%d\n", ret);
-        /* 如果 cpufreq_driver_target 失败，至少用 __cpufreq_driver_target 再试 */
-        ret = __cpufreq_driver_target(policy, target_freq, CPUFREQ_RELATION_H);
-        if (ret == 0)
-            pr_info("FTS: __cpufreq_driver_target success\n");
-        else
-            pr_warn("FTS: __cpufreq_driver_target failed, ret=%d\n", ret);
-    }
-
-    /* 强制更新策略（让内核重新评估频率） */
-    cpufreq_update_policy(cpu);
-
-    /* 读取设置后的频率确认 */
-    msleep(10);
-    pr_info("FTS: CPU7 after boost: cur=%u\n", policy->cur);
-
-    boost_active = 1;
-    cpufreq_cpu_put(policy);
-    mutex_unlock(&boost_mutex);
-
-    /* 设置定时器，2秒后恢复（防止释放事件丢失） */
-    mod_timer(&fts_restore_timer, jiffies + msecs_to_jiffies(2000));
-}
-
  /*
  * 超时自动恢复（防止触摸释放事件丢失）
  */
@@ -7558,10 +7498,8 @@ static int fts_probe(struct spi_device *client)
 	INIT_WORK(&info->sleep_work, fts_ts_sleep_work);
 		/* 初始化触摸频率提升相关 */
 	INIT_WORK(&fts_boost_work, fts_apply_boost);
-	INIT_WORK(&fts_restore_work, fts_restore_freq);
 	INIT_DELAYED_WORK(&fts_restore_work, fts_restore_freq);
 	timer_setup(&fts_restore_timer, fts_restore_timeout, 0);
-INIT_DELAYED_WORK(&fts_restore_delayed_work, fts_restore_freq);
 	
 	init_completion(&info->tp_reset_completion);
 #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
