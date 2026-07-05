@@ -31,7 +31,7 @@
 #include <linux/device.h>
 #include <linux/cpufreq.h>
 #include <linux/workqueue.h>
-#include <linux/sched.h>
+#include <linux/timer.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -153,41 +153,10 @@ extern spinlock_t fts_int;
 struct fts_ts_info *fts_info;
 
 /* 新增：直接调频相关 */
-static int boost_cpu;
 static struct work_struct fts_boost_work;
-
-static void fts_boost_work_handler(struct work_struct *work)
-{
-    struct cpufreq_policy *policy;
-    int cpu = 7;  /* 超大核 CPU7 */
-
-    /* 1. 先把当前进程迁移到 CPU7 */
-    set_cpus_allowed_ptr(current, cpumask_of(cpu));
-
-    /* 2. 获取 CPU7 的 policy */
-    policy = cpufreq_cpu_get(cpu);
-    if (!policy) {
-        pr_alert("FTS: CPU7 policy not found\n");
-        return;
-    }
-
-    pr_alert("FTS: CPU7 before: cur=%u, min=%u, max=%u\n",
-             policy->cur, policy->min, policy->cpuinfo.max_freq);
-
-    /* 3. 方法1：通过 cpufreq_driver_target */
-    cpufreq_driver_target(policy, policy->cpuinfo.max_freq, CPUFREQ_RELATION_H);
-
-    /* 4. 方法2：直接修改 policy->min 强制提升 */
-    policy->min = policy->cpuinfo.max_freq;
-    policy->user_policy.min = policy->cpuinfo.max_freq;
-    cpufreq_update_policy(cpu);
-
-    msleep(20);
-
-    pr_alert("FTS: CPU7 after: cur=%u\n", policy->cur);
-
-    cpufreq_cpu_put(policy);
-}
+static struct timer_list fts_restore_timer;
+static unsigned int saved_min_freq = 0;
+static int boost_active = 0;
 
 static int fts_init_sensing(struct fts_ts_info *info);
 static int fts_mode_handler(struct fts_ts_info *info, int force);
@@ -4521,6 +4490,76 @@ static void buffDump(unsigned char *buf, unsigned int buflength, char *tag)
 }
 */
 
+/*
+ * 恢复 CPU7 频率到原始值
+ */
+static void fts_restore_freq(struct timer_list *t)
+{
+    struct cpufreq_policy *policy;
+    int cpu = 7;
+
+    if (!saved_min_freq || !boost_active) {
+        return;
+    }
+
+    policy = cpufreq_cpu_get(cpu);
+    if (policy) {
+        pr_info("FTS: Restoring CPU7 min to %u\n", saved_min_freq);
+        policy->min = saved_min_freq;
+        policy->user_policy.min = saved_min_freq;
+        cpufreq_update_policy(cpu);
+        msleep(20);
+        pr_info("FTS: CPU7 after restore: cur=%u\n", policy->cur);
+        cpufreq_cpu_put(policy);
+    } else {
+        pr_warn("FTS: CPU7 policy not found for restore\n");
+    }
+
+    boost_active = 0;
+}
+
+/*
+ * 提升 CPU7 到最高频率，并安排 2 秒后恢复
+ */
+static void fts_boost_work_handler(struct work_struct *work)
+{
+    struct cpufreq_policy *policy;
+    int cpu = 7;
+
+    /* 如果已有 boost 在活跃，先取消旧定时器 */
+    if (boost_active) {
+        del_timer_sync(&fts_restore_timer);
+    }
+
+    policy = cpufreq_cpu_get(cpu);
+    if (!policy) {
+        pr_warn("FTS: CPU7 policy not found\n");
+        return;
+    }
+
+    /* 首次运行时保存原始 min 频率 */
+    if (saved_min_freq == 0) {
+        saved_min_freq = policy->min;
+        pr_info("FTS: Saved original min=%u\n", saved_min_freq);
+    }
+
+    pr_info("FTS: CPU7 boosting to max=%u\n", policy->cpuinfo.max_freq);
+
+    /* 将 min 设为最大值，强制升频 */
+    policy->min = policy->cpuinfo.max_freq;
+    policy->user_policy.min = policy->cpuinfo.max_freq;
+    cpufreq_update_policy(cpu);
+
+    msleep(20);
+    pr_info("FTS: CPU7 after boost: cur=%u\n", policy->cur);
+
+    cpufreq_cpu_put(policy);
+
+    /* 激活标志并设置定时器，2 秒后恢复 */
+    boost_active = 1;
+    mod_timer(&fts_restore_timer, jiffies + msecs_to_jiffies(2000));
+}
+
 static void fts_ts_sleep_work(struct work_struct *work)
 {
 	struct fts_ts_info *info = container_of(work, struct fts_ts_info, sleep_work);
@@ -4579,14 +4618,10 @@ static void fts_ts_sleep_work(struct work_struct *work)
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
 				
-				        /* ===== FTS TOUCH BOOST（直接调频） ===== */
-    if (evt_data[0] == EVT_ID_ENTER_POINT || 
-        evt_data[0] == EVT_ID_MOTION_POINT) {
-        boost_cpu = smp_processor_id();
-        schedule_work(&fts_boost_work);
-        pr_info("FTS: Touch event on CPU%d, boost scheduled\n", boost_cpu);
-    }
-    /* ===== END ===== */
+				if (evt_data[0] == EVT_ID_ENTER_POINT || 
+    evt_data[0] == EVT_ID_MOTION_POINT) {
+    schedule_work(&fts_boost_work);
+}
     
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
@@ -4676,14 +4711,10 @@ static irqreturn_t fts_event_handler(int irq, void *ts_info)
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
 				
-				/* ===== FTS TOUCH BOOST（直接调频） ===== */
-    if (evt_data[0] == EVT_ID_ENTER_POINT || 
-        evt_data[0] == EVT_ID_MOTION_POINT) {
-        boost_cpu = smp_processor_id();
-        schedule_work(&fts_boost_work);
-        pr_info("FTS: Touch event (sleep) on CPU%d, boost scheduled\n", boost_cpu);
-    }
-    /* ===== END ===== */
+			if (evt_data[0] == EVT_ID_ENTER_POINT || 
+    evt_data[0] == EVT_ID_MOTION_POINT) {
+    schedule_work(&fts_boost_work);
+}
 
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
@@ -7387,8 +7418,8 @@ static int fts_probe(struct spi_device *client)
 	INIT_WORK(&info->resume_work, fts_resume_work);
 	INIT_WORK(&info->suspend_work, fts_suspend_work);
 	INIT_WORK(&info->sleep_work, fts_ts_sleep_work);
-	/* 新增 */
-INIT_WORK(&fts_boost_work, fts_boost_work_handler);
+	INIT_WORK(&fts_boost_work, fts_boost_work_handler);
+timer_setup(&fts_restore_timer, fts_restore_freq, 0);
 	init_completion(&info->tp_reset_completion);
 #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
 	init_waitqueue_head(&info->wait_queue);
@@ -7792,6 +7823,9 @@ static int fts_remove(struct spi_device *client)
 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
 	/* remove interrupt and event handlers */
 	fts_interrupt_uninstall(info);
+	del_timer_sync(&fts_restore_timer);
+flush_work(&fts_boost_work);
+
 	/*backlight_unregister_notifier(&info->bl_notifier);*/
 	pm_qos_remove_request(&info->pm_qos_req);
 #ifdef CONFIG_DRM
