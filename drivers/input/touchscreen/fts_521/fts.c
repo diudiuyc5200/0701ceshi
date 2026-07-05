@@ -158,7 +158,6 @@ extern spinlock_t fts_int;
 struct fts_ts_info *fts_info;
 
 static struct work_struct fts_boost_work;
-static struct work_struct fts_restore_work;
 static struct timer_list fts_restore_timer;
 static unsigned int saved_min_freq = 0;
 static int boost_active = 0;
@@ -4590,7 +4589,7 @@ static void fts_ts_sleep_work(struct work_struct *work)
 	return;
 }
 
-static int fts_read_gov_from_cpu(int cpu, char *buf, size_t buf_size)
+static int fts_write_gov_to_cpu(int cpu, const char *gov)
 {
     struct file *file;
     char path[128];
@@ -4600,21 +4599,19 @@ static int fts_read_gov_from_cpu(int cpu, char *buf, size_t buf_size)
     snprintf(path, sizeof(path),
              "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", cpu);
 
-    file = filp_open(path, O_RDONLY, 0);
+    file = filp_open(path, O_WRONLY, 0);
     if (IS_ERR(file)) {
+        pr_warn("FTS: Cannot open %s\n", path);
         return PTR_ERR(file);
     }
 
-    ret = kernel_read(file, buf, buf_size - 1, &pos);
+    ret = kernel_write(file, gov, strlen(gov), &pos);
     filp_close(file, NULL);
 
-    if (ret < 0)
+    if (ret < 0) {
+        pr_warn("FTS: Write to CPU%d failed\n", cpu);
         return ret;
-
-    buf[ret] = '\0';
-    /* 去掉换行符 */
-    if (buf[ret - 1] == '\n')
-        buf[ret - 1] = '\0';
+    }
 
     return 0;
 }
