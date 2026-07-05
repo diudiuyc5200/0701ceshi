@@ -30,6 +30,7 @@
 */
 #include <linux/device.h>
 #include <linux/cpufreq.h>
+#include <linux/workqueue.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -149,6 +150,24 @@ static u8 key_mask;
 
 extern spinlock_t fts_int;
 struct fts_ts_info *fts_info;
+
+/* 新增：直接调频相关 */
+static int boost_cpu;
+static struct work_struct fts_boost_work;
+
+static void fts_boost_work_handler(struct work_struct *work)
+{
+    struct cpufreq_policy *policy;
+    int cpu = boost_cpu;
+    
+    policy = cpufreq_cpu_get(cpu);
+    if (policy) {
+        cpufreq_driver_target(policy, policy->cpuinfo.max_freq, 
+                              CPUFREQ_RELATION_H);
+        cpufreq_cpu_put(policy);
+        pr_info("FTS: Boost set CPU%d to max freq\n", cpu);
+    }
+}
 
 static int fts_init_sensing(struct fts_ts_info *info);
 static int fts_mode_handler(struct fts_ts_info *info, int force);
@@ -4540,10 +4559,12 @@ static void fts_ts_sleep_work(struct work_struct *work)
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
 				
-				    /* ===== FTS TOUCH BOOST ===== */
+				        /* ===== FTS TOUCH BOOST（直接调频） ===== */
     if (evt_data[0] == EVT_ID_ENTER_POINT || 
         evt_data[0] == EVT_ID_MOTION_POINT) {
-        sugov_trigger_iowait_boost(smp_processor_id());
+        boost_cpu = smp_processor_id();
+        schedule_work(&fts_boost_work);
+        pr_info("FTS: Touch event on CPU%d, boost scheduled\n", boost_cpu);
     }
     /* ===== END ===== */
     
@@ -4635,12 +4656,14 @@ static irqreturn_t fts_event_handler(int irq, void *ts_info)
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
 				
-				/* ===== FTS TOUCH BOOST ===== */
-if (evt_data[0] == EVT_ID_ENTER_POINT || 
-    evt_data[0] == EVT_ID_MOTION_POINT) {
-    sugov_trigger_iowait_boost(smp_processor_id());
-}
-/* ===== END ===== */
+				/* ===== FTS TOUCH BOOST（直接调频） ===== */
+    if (evt_data[0] == EVT_ID_ENTER_POINT || 
+        evt_data[0] == EVT_ID_MOTION_POINT) {
+        boost_cpu = smp_processor_id();
+        schedule_work(&fts_boost_work);
+        pr_info("FTS: Touch event (sleep) on CPU%d, boost scheduled\n", boost_cpu);
+    }
+    /* ===== END ===== */
 
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
@@ -7344,6 +7367,8 @@ static int fts_probe(struct spi_device *client)
 	INIT_WORK(&info->resume_work, fts_resume_work);
 	INIT_WORK(&info->suspend_work, fts_suspend_work);
 	INIT_WORK(&info->sleep_work, fts_ts_sleep_work);
+	/* 新增 */
+INIT_WORK(&fts_boost_work, fts_boost_work_handler);
 	init_completion(&info->tp_reset_completion);
 #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
 	init_waitqueue_head(&info->wait_queue);
