@@ -31,6 +31,7 @@
 #include <linux/device.h>
 #include <linux/cpufreq.h>
 #include <linux/workqueue.h>
+#include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -158,15 +159,34 @@ static struct work_struct fts_boost_work;
 static void fts_boost_work_handler(struct work_struct *work)
 {
     struct cpufreq_policy *policy;
-    int cpu = boost_cpu;
-    
+    int cpu = 7;  /* 超大核 CPU7 */
+
+    /* 1. 先把当前进程迁移到 CPU7 */
+    set_cpus_allowed_ptr(current, cpumask_of(cpu));
+
+    /* 2. 获取 CPU7 的 policy */
     policy = cpufreq_cpu_get(cpu);
-    if (policy) {
-        cpufreq_driver_target(policy, policy->cpuinfo.max_freq, 
-                              CPUFREQ_RELATION_H);
-        cpufreq_cpu_put(policy);
-        pr_info("FTS: Boost set CPU%d to max freq\n", cpu);
+    if (!policy) {
+        pr_alert("FTS: CPU7 policy not found\n");
+        return;
     }
+
+    pr_alert("FTS: CPU7 before: cur=%u, min=%u, max=%u\n",
+             policy->cur, policy->min, policy->cpuinfo.max_freq);
+
+    /* 3. 方法1：通过 cpufreq_driver_target */
+    cpufreq_driver_target(policy, policy->cpuinfo.max_freq, CPUFREQ_RELATION_H);
+
+    /* 4. 方法2：直接修改 policy->min 强制提升 */
+    policy->min = policy->cpuinfo.max_freq;
+    policy->user_policy.min = policy->cpuinfo.max_freq;
+    cpufreq_update_policy(cpu);
+
+    msleep(20);
+
+    pr_alert("FTS: CPU7 after: cur=%u\n", policy->cur);
+
+    cpufreq_cpu_put(policy);
 }
 
 static int fts_init_sensing(struct fts_ts_info *info);
