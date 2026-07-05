@@ -3591,6 +3591,9 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 	int x, y, z, distance;
 	u8 touchType;
 	int area_size;
+	 /* 新增：触摸按下提升频率 */
+    schedule_work(&fts_boost_work);
+    // ... 后面所有原有代码保持不变 ...
 #ifdef CONFIG_INPUT_PRESS_NDT
 	int forcekey_code = -1;
 #endif
@@ -3751,6 +3754,9 @@ static void fts_leave_pointer_event_handler(struct fts_ts_info *info,
 	unsigned int tool = MT_TOOL_FINGER;
 	unsigned int touch_condition = 0;
 	u8 touchType;
+	/* ===== 触摸抬起 - 恢复 CPU7 频率 ===== */
+    schedule_work(&fts_restore_work);
+    /* ===== END ===== */
 #ifdef CONFIG_FTS_FOD_AREA_REPORT
 	int x, y;
 	bool fod_up = false;
@@ -4555,12 +4561,6 @@ static void fts_ts_sleep_work(struct work_struct *work)
 			}
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
-				
-				            /* 触摸按下 - 提升 CPU7 频率 */
-            if (evt_data[0] == EVT_ID_ENTER_POINT || evt_data[0] == EVT_ID_MOTION_POINT) {
-                schedule_work(&fts_boost_work);
-            }
-            
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
 			if (eventId < NUM_EVT_ID) {
@@ -4736,12 +4736,6 @@ static irqreturn_t fts_event_handler(int irq, void *ts_info)
 			}
 			if (evt_data[0] == EVT_ID_NOEVENT)
 				break;
-				
-				            /* 触摸按下 - 提升 CPU7 频率 */
-            if (evt_data[0] == EVT_ID_ENTER_POINT || evt_data[0] == EVT_ID_MOTION_POINT) {
-                schedule_work(&fts_boost_work);
-            }
-            
 			eventId = evt_data[0] >> 4;
 			/*Ensure event ID is within bounds*/
 			if (eventId < NUM_EVT_ID) {
