@@ -654,9 +654,12 @@ static int fg_get_manufacture_data(struct bq_fg_chip *bq)
 static int fg_read_rsoc(struct bq_fg_chip *bq)
 {
 	static int last_soc;
+	static int abnormal_count = 0;
 	int soc, ret;
+	
 	if (bq->fake_soc > 0)
 		return bq->fake_soc;
+	
 	ret = regmap_read(bq->regmap, bq->regs[BQ_FG_REG_SOC], &soc);
 	if (ret < 0) {
 		bq_dbg(PR_OEM, "could not read RSOC, ret = %d\n", ret);
@@ -664,6 +667,27 @@ static int fg_read_rsoc(struct bq_fg_chip *bq)
 			last_soc = 50;
 		return last_soc;
 	}
+	
+	/* ===== SOC 异常保护 ===== */
+	if (soc == 0 && bq->batt_volt > 3500) {
+		abnormal_count++;
+		if (abnormal_count < 5) {
+			bq_dbg(PR_OEM, "SOC=0 but voltage normal(%dmV), use last_soc=%d, count=%d\n",
+				   bq->batt_volt, last_soc, abnormal_count);
+			return last_soc ? last_soc : 5;
+		} else {
+			bq_dbg(PR_OEM, "SOC=0 abnormal count exceed, report 0\n");
+		}
+	} else {
+		abnormal_count = 0;
+	}
+	
+	/* 最低锁定 5% */
+	if (soc < 5 && bq->batt_volt > 3500) {
+		bq_dbg(PR_OEM, "SOC=%d but voltage normal, clamp to 5\n", soc);
+		soc = 5;
+	}
+	
 	last_soc = soc;
 	return soc;
 }
@@ -672,11 +696,19 @@ static int fg_read_rsoc(struct bq_fg_chip *bq)
 static int fg_read_system_soc(struct bq_fg_chip *bq)
 {
 	int soc, curr, temp, raw_soc;
+	
 	soc = fg_read_rsoc(bq);
 	raw_soc = fg_get_raw_soc(bq);
 	fg_read_current(bq, &curr);
 	temp = fg_read_temperature(bq);
 	soc = bq_battery_soc_smooth_tracking(bq, raw_soc, soc, temp, curr);
+	
+	/* 额外保护，确保 SOC 不低于 5% */
+	if (soc < 5 && bq->batt_volt > 3500) {
+		bq_dbg(PR_OEM, "system_soc=%d but voltage normal, clamp to 5\n", soc);
+		soc = 5;
+	}
+	
 	return soc;
 }
 static int fg_read_temperature(struct bq_fg_chip *bq)
@@ -1023,6 +1055,8 @@ static int fg_get_property(struct power_supply *psy, enum power_supply_property 
 			val->intval = 50;
 			break;
 		}
+		/* 先更新电压，确保 fg_read_rsoc 中的电压检测有效 */
+	bq->batt_volt = fg_read_volt(bq);
 		val->intval = fg_read_system_soc(bq);
 		bq->batt_soc = val->intval;
 		break;
