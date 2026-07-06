@@ -18,7 +18,7 @@
 #include <trace/events/power.h>
 #include <linux/sched/sysctl.h>
 #include "sched.h"
-#include <linux/sqrt.h>
+#include <linux/kernel.h>
 
 #define SUGOV_KTHREAD_PRIORITY	50
 #define UTIL_BOOST_FACTOR 150
