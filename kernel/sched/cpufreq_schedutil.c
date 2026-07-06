@@ -18,8 +18,10 @@
 #include <trace/events/power.h>
 #include <linux/sched/sysctl.h>
 #include "sched.h"
+#include <linux/sqrt.h>
 
 #define SUGOV_KTHREAD_PRIORITY	50
+#define UTIL_BOOST_FACTOR 150
 
 struct sugov_tunables {
 	struct gov_attr_set attr_set;
@@ -155,8 +157,12 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 	struct cpufreq_policy *policy = sg_policy->policy;
 	unsigned int freq = arch_scale_freq_invariant() ?
 				policy->cpuinfo.max_freq : policy->cur;
+	unsigned long sqrt_util;
 
-	freq = (freq + (freq >> 2)) * util / max;
+	/* 使用平方根算法放大轻负载利用率 */
+	sqrt_util = int_sqrt(util * max);  /* 开方后再放大到 max 量级 */
+	freq = (freq + (freq >> 2)) * sqrt_util / max;
+
 	trace_sugov_next_freq(policy->cpu, util, max, freq);
 
 	if (freq == sg_policy->cached_raw_freq && sg_policy->next_freq != UINT_MAX)
@@ -174,6 +180,11 @@ static void sugov_get_util(unsigned long *util, unsigned long *max, int cpu)
 
 	*util = min(rq->cfs.avg.util_avg, cfs_max);
 	*max = cfs_max;
+
+	/* 放大 util：轻负载响应更快，但不超过 100% */
+	*util = (*util * UTIL_BOOST_FACTOR) / 100;
+	if (*util > *max)
+		*util = *max;
 }
 
 static void sugov_set_iowait_boost(struct sugov_cpu *sg_cpu, u64 time,
@@ -637,7 +648,6 @@ static int sugov_init(struct cpufreq_policy *policy)
 		}
 		policy->governor_data = sg_policy;
 		sg_policy->tunables = global_tunables;
-
 		gov_attr_set_get(&global_tunables->attr_set, &sg_policy->tunables_hook);
 		goto out;
 	}
@@ -649,15 +659,21 @@ static int sugov_init(struct cpufreq_policy *policy)
 	}
 
 	/*
-	 * PELT优化：更激进的rate_limit
-	 * up_rate_limit_us = 500us (0.5ms) 让频率快速响应触摸
+	 * 优化：根据 CPU 类型设置不同参数
+	 * 大核（CPU4-7）降频慢，保持高频更久
+	 * 小核（CPU0-3）降频快，省电
 	 */
-	tunables->up_rate_limit_us = 500;
-	tunables->down_rate_limit_us = 5000;
+	if (policy->cpu >= 4) {
+		tunables->up_rate_limit_us = 500;
+		tunables->down_rate_limit_us = 20000;  /* 20ms，降频慢 */
+	} else {
+		tunables->up_rate_limit_us = 500;
+		tunables->down_rate_limit_us = 5000;   /* 5ms，降频快 */
+	}
 
 	policy->governor_data = sg_policy;
 	sg_policy->tunables = tunables;
-	stale_ns = sched_ravg_window + (sched_ravg_window >> 3);
+	stale_ns = sched_ravg_window / 2;
 
 	sugov_tunables_restore(policy);
 
