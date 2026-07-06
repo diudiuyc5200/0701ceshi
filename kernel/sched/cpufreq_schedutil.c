@@ -215,7 +215,7 @@ static void sugov_set_iowait_boost(struct sugov_cpu *sg_cpu, u64 time,
 		s64 delta_ns = time - sg_cpu->last_update;
 
 		/* PELT优化：boost保持更久 (3 ticks) */
-		if (delta_ns > TICK_NSEC * 3) {
+		if (delta_ns > TICK_NSEC * 10) {
 			sg_cpu->iowait_boost = 0;
 			sg_cpu->iowait_boost_pending = false;
 		}
@@ -233,7 +233,7 @@ static void sugov_iowait_boost(struct sugov_cpu *sg_cpu, unsigned long *util,
 	if (sg_cpu->iowait_boost_pending) {
 		sg_cpu->iowait_boost_pending = false;
 	} else {
-		sg_cpu->iowait_boost >>= 1;
+		sg_cpu->iowait_boost -= sg_cpu->iowait_boost / 10;
 		if (sg_cpu->iowait_boost < sg_cpu->sg_policy->policy->min) {
 			sg_cpu->iowait_boost = 0;
 			return;
@@ -665,10 +665,10 @@ static int sugov_init(struct cpufreq_policy *policy)
 	 */
 	if (policy->cpu >= 4) {
 		tunables->up_rate_limit_us = 500;
-		tunables->down_rate_limit_us = 20000;  /* 20ms，降频慢 */
+		tunables->down_rate_limit_us = 100000;  /* 20ms，降频慢 */
 	} else {
 		tunables->up_rate_limit_us = 500;
-		tunables->down_rate_limit_us = 5000;   /* 5ms，降频快 */
+		tunables->down_rate_limit_us = 20000;   /* 5ms，降频快 */
 	}
 
 	policy->governor_data = sg_policy;
