@@ -51,6 +51,40 @@ module_param_named(
 #define BQ_CHARGE_FULL_SOC	9750
 #define BQ_RECHARGE_SOC		9900
 #define PD_CHG_UPDATE_DELAY_US	20	/*20 sec*/
+
+/* ===== 电压到 SOC 映射表 ===== */
+static const struct voltage_soc_map {
+	int voltage;	/* mV */
+	int soc;	/* % */
+} volt_soc_table[] = {
+	{ 4350, 100 },
+	{ 4300, 95 },
+	{ 4260, 90 },
+	{ 4220, 85 },
+	{ 4190, 80 },
+	{ 4150, 75 },
+	{ 4120, 70 },
+	{ 4090, 65 },
+	{ 4060, 60 },
+	{ 4030, 55 },
+	{ 4000, 50 },
+	{ 3970, 45 },
+	{ 3940, 40 },
+	{ 3910, 35 },
+	{ 3880, 30 },
+	{ 3850, 25 },
+	{ 3820, 23 },
+	{ 3790, 20 },
+	{ 3750, 17 },
+	{ 3700, 15 },
+	{ 3650, 12 },
+	{ 3600, 10 },
+	{ 3500, 5 },
+	{ 3450, 0 },
+};
+#define VOLT_SOC_TABLE_SIZE (sizeof(volt_soc_table) / sizeof((volt_soc_table)[0]))
+/* ===== 电压到 SOC 映射表结束 ===== */
+
 enum bq_fg_reg_idx {
 	BQ_FG_REG_CTRL = 0,
 	BQ_FG_REG_TEMP,		/* Battery Temperature */
@@ -163,7 +197,7 @@ struct bq_fg_chip {
 	int fake_soc;
 	int fake_temp;
 	int fake_volt;
-	/* 新增：charge_full自定义覆盖变量 */
+	/* charge_full自定义覆盖变量 */
 	int custom_charge_full;
 	bool charge_full_override;
 	bool skip_writes;
@@ -205,6 +239,11 @@ static int fg_get_raw_soc(struct bq_fg_chip *bq);
 static int fg_read_current(struct bq_fg_chip *bq, int *curr);
 static int fg_read_temperature(struct bq_fg_chip *bq);
 static int calc_delta_time(struct timeval *time_stamp, int *delta_time);
+
+/* ===== 添加函数声明 ===== */
+static int fg_read_volt(struct bq_fg_chip *bq);
+/* ===== 函数声明结束 ===== */
+
 /*
 static int __fg_read_byte(struct i2c_client *client, u8 reg, u8 *val)
 {
@@ -651,46 +690,102 @@ static int fg_get_manufacture_data(struct bq_fg_chip *bq)
 	}
 	return 0;
 }
-static int fg_read_rsoc(struct bq_fg_chip *bq)
+
+/* ===== 根据电压估算 SOC ===== */
+static int fg_voltage_to_soc(int voltage)
 {
-	static int last_soc;
-	static int abnormal_count = 0;
-	int soc, ret;
+	int i;
+	int soc = 5;  /* 默认 5% */
 	
-	if (bq->fake_soc > 0)
-		return bq->fake_soc;
+	if (voltage >= volt_soc_table[0].voltage)
+		return 100;
 	
-	ret = regmap_read(bq->regmap, bq->regs[BQ_FG_REG_SOC], &soc);
-	if (ret < 0) {
-		bq_dbg(PR_OEM, "could not read RSOC, ret = %d\n", ret);
-		if (!last_soc)
-			last_soc = 50;
-		return last_soc;
-	}
+	if (voltage <= volt_soc_table[VOLT_SOC_TABLE_SIZE - 1].voltage)
+		return 0;
 	
-	/* ===== SOC 异常保护 ===== */
-	if (soc == 0 && bq->batt_volt > 3500) {
-		abnormal_count++;
-		if (abnormal_count < 5) {
-			bq_dbg(PR_OEM, "SOC=0 but voltage normal(%dmV), use last_soc=%d, count=%d\n",
-				   bq->batt_volt, last_soc, abnormal_count);
-			return last_soc ? last_soc : 5;
-		} else {
-			bq_dbg(PR_OEM, "SOC=0 abnormal count exceed, report 0\n");
+	for (i = 0; i < VOLT_SOC_TABLE_SIZE - 1; i++) {
+		if (voltage <= volt_soc_table[i].voltage &&
+		    voltage > volt_soc_table[i + 1].voltage) {
+			int range = volt_soc_table[i].voltage - volt_soc_table[i + 1].voltage;
+			int step = volt_soc_table[i].soc - volt_soc_table[i + 1].soc;
+			int delta = voltage - volt_soc_table[i + 1].voltage;
+			soc = volt_soc_table[i + 1].soc + (delta * step / range);
+			break;
 		}
-	} else {
-		abnormal_count = 0;
 	}
 	
-	/* 最低锁定 5% */
-	if (soc < 5 && bq->batt_volt > 3500) {
-		bq_dbg(PR_OEM, "SOC=%d but voltage normal, clamp to 5\n", soc);
-		soc = 5;
-	}
-	
-	last_soc = soc;
 	return soc;
 }
+/* ===== 电压估算结束 ===== */
+
+/* ===== 重写 fg_read_rsoc：使用电压估算 ===== */
+static int fg_read_rsoc(struct bq_fg_chip *bq)
+{
+	static int last_soc = 50;
+	static int last_volt = 3700;
+	static int last_valid_soc = 50;
+	int volt;
+	int soc;
+	int curr;
+	bool is_charging;
+	int ret;
+
+	if (bq->fake_soc > 0)
+		return bq->fake_soc;
+
+	/* 1. 读取电压（这是最可靠的读数） */
+	volt = fg_read_volt(bq);
+	if (volt < 0) {
+		volt = last_volt;
+		bq_dbg(PR_OEM, "voltage read failed, using last=%d\n", last_volt);
+	}
+	last_volt = volt;
+
+	/* 2. 读取当前判断是否在充电 */
+	ret = fg_read_current(bq, &curr);
+	is_charging = (ret == 0 && curr > 100);
+	if (ret < 0)
+		is_charging = false;
+
+	/* 3. 根据电压估算 SOC */
+	soc = fg_voltage_to_soc(volt);
+
+	/* 4. 充电时 SOC 缓慢增加，防止跳变 */
+	if (is_charging) {
+		if (soc < last_valid_soc && volt >= last_volt) {
+			soc = last_valid_soc;
+		}
+		if (soc > last_valid_soc + 2) {
+			soc = last_valid_soc + 2;
+		}
+	}
+
+	/* 5. 确保 SOC 在 5%~100% 之间 */
+	if (soc < 5)
+		soc = 5;
+	if (soc > 100)
+		soc = 100;
+
+	/* 6. 放电时防止异常跳高 */
+	if (soc > last_valid_soc + 20 && !is_charging) {
+		bq_dbg(PR_OEM, "soc jump %d->%d, using last\n", last_valid_soc, soc);
+		soc = last_valid_soc;
+	}
+
+	/* 7. 更新记录 */
+	if (soc != last_soc || volt != last_volt) {
+		bq_dbg(PR_OEM, "volt=%dmV, soc=%d%%, charging=%d, curr=%d\n",
+		       volt, soc, is_charging, curr);
+	}
+
+	last_soc = soc;
+	last_volt = volt;
+	last_valid_soc = soc;
+
+	return soc;
+}
+/* ===== fg_read_rsoc 结束 ===== */
+
 #define FG_REPORT_FULL_SOC	9600
 #define FG_OPTIMIZ_FULL_TIME	40
 static int fg_read_system_soc(struct bq_fg_chip *bq)
@@ -703,7 +798,6 @@ static int fg_read_system_soc(struct bq_fg_chip *bq)
 	temp = fg_read_temperature(bq);
 	soc = bq_battery_soc_smooth_tracking(bq, raw_soc, soc, temp, curr);
 	
-	/* 额外保护，确保 SOC 不低于 5% */
 	if (soc < 5 && bq->batt_volt > 3500) {
 		bq_dbg(PR_OEM, "system_soc=%d but voltage normal, clamp to 5\n", soc);
 		soc = 5;
@@ -715,18 +809,21 @@ static int fg_read_temperature(struct bq_fg_chip *bq)
 {
 	int ret;
 	u16 temp = 0;
-	static int last_temp;
+	static int last_temp = 250;
+	
 	if (bq->fake_temp > 0)
 		return bq->fake_temp;
+	
 	ret = fg_read_word(bq, bq->regs[BQ_FG_REG_TEMP], &temp);
 	if (ret < 0) {
-		bq_dbg(PR_OEM, "could not read temperature, ret = %d\n", ret);
+		bq_dbg(PR_OEM, "could not read temperature, ret=%d\n", ret);
 		if (!last_temp)
 			last_temp = 250;
 		return last_temp;
 	}
+	
 	last_temp = temp - 2730;
-	return temp - 2730;
+	return last_temp;
 }
 static int fg_read_volt(struct bq_fg_chip *bq)
 {
@@ -734,7 +831,7 @@ static int fg_read_volt(struct bq_fg_chip *bq)
 	u16 volt = 0;
 	ret = fg_read_word(bq, bq->regs[BQ_FG_REG_VOLT], &volt);
 	if (ret < 0) {
-		bq_dbg(PR_OEM, "could not read voltage, ret = %d\n", ret);
+		bq_dbg(PR_OEM, "could not read voltage, ret=%d\n", ret);
 		return 3700;
 	}
 	return volt;
@@ -745,7 +842,7 @@ static int fg_read_avg_current(struct bq_fg_chip *bq, int *curr)
 	s16 avg_curr = 0;
 	ret = fg_read_word(bq, bq->regs[BQ_FG_REG_AI], (u16 *)&avg_curr);
 	if (ret < 0) {
-		bq_dbg(PR_OEM, "could not read current, ret = %d\n", ret);
+		bq_dbg(PR_OEM, "could not read current, ret=%d\n", ret);
 		return ret;
 	}
 	*curr = -1 * avg_curr;
@@ -757,7 +854,7 @@ static int fg_read_current(struct bq_fg_chip *bq, int *curr)
 	s16 avg_curr = 0;
 	ret = fg_read_word(bq, bq->regs[BQ_FG_REG_CN], (u16 *)&avg_curr);
 	if (ret < 0) {
-		bq_dbg(PR_OEM, "could not read current, ret = %d\n", ret);
+		bq_dbg(PR_OEM, "could not read current, ret=%d\n", ret);
 		return ret;
 	}
 	*curr = -1 * avg_curr;
@@ -1055,8 +1152,7 @@ static int fg_get_property(struct power_supply *psy, enum power_supply_property 
 			val->intval = 50;
 			break;
 		}
-		/* 先更新电压，确保 fg_read_rsoc 中的电压检测有效 */
-	bq->batt_volt = fg_read_volt(bq);
+		bq->batt_volt = fg_read_volt(bq);
 		val->intval = fg_read_system_soc(bq);
 		bq->batt_soc = val->intval;
 		break;
@@ -1094,7 +1190,6 @@ static int fg_get_property(struct power_supply *psy, enum power_supply_property 
 		val->intval = bq->batt_tte;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		/* 新增：优先读取自定义容量 */
 		if (bq->charge_full_override) {
 			val->intval = bq->custom_charge_full;
 			break;
@@ -1220,7 +1315,6 @@ static int fg_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		bq->fake_volt = val->intval;
 		break;
-	/* 新增 charge_full 写入分支 */
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		if (val->intval >= 500000 && val->intval <= 20000000) {
 			bq->custom_charge_full = val->intval;
@@ -1245,7 +1339,6 @@ static int fg_prop_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_FASTCHARGE_MODE:
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
-	/* 标记charge_full可写 */
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		ret = 1;
 		break;
@@ -1602,8 +1695,6 @@ static void fg_monitor_workfunc(struct work_struct *work)
 	int rc;
 	if (!bq->old_hw) {
 		rc = fg_dump_registers(bq);
-		/*if (rc < 0)
-			return;*/
 		fg_update_status(bq);
 	}
 	schedule_delayed_work(&bq->monitor_work, 10 * HZ);
@@ -1700,7 +1791,6 @@ static int bq_fg_probe(struct i2c_client *client,
 	bq->fake_soc	= -EINVAL;
 	bq->fake_temp	= -EINVAL;
 	bq->fake_volt	= -EINVAL;
-	/* 自定义容量覆盖变量初始化 */
 	bq->charge_full_override = false;
 	bq->custom_charge_full = 0;
 
@@ -1798,4 +1888,3 @@ module_i2c_driver(bq_fg_driver);
 MODULE_DESCRIPTION("TI BQ27Z561 Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Texas Instruments");
-

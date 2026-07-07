@@ -665,10 +665,10 @@ static int sugov_init(struct cpufreq_policy *policy)
 	 */
 	if (policy->cpu >= 4) {
 		tunables->up_rate_limit_us = 500;
-		tunables->down_rate_limit_us = 100000;  /* 20ms，降频慢 */
+		tunables->down_rate_limit_us = 60000;  /* 20ms，降频慢 */
 	} else {
 		tunables->up_rate_limit_us = 500;
-		tunables->down_rate_limit_us = 20000;   /* 5ms，降频快 */
+		tunables->down_rate_limit_us = 60000;   /* 5ms，降频快 */
 	}
 
 	policy->governor_data = sg_policy;
